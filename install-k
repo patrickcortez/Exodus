@@ -1,0 +1,70 @@
+#!/bin/bash
+#
+# Exodus Kernel Module Installer
+#
+# This script installs the 'cortez_tunnel.ko' module into the
+# kernel modules directory, updates dependencies, and configures
+# it to load automatically on boot.
+#
+# Must be run with sudo or as root.
+#
+
+set -e
+
+# --- Configuration ---
+MODULE_NAME="cortez_tunnel"
+MODULE_FILE="${MODULE_NAME}.ko"
+
+# --- 1. Root Check ---
+if [ "$(id -u)" -ne 0 ]; then
+    echo "This script must be run with sudo or as root." >&2
+    exit 1
+fi
+
+# --- 2. File Check ---
+if [ ! -f "$MODULE_FILE" ]; then
+    echo "Error: Module file '$MODULE_FILE' not found in this directory." >&2
+    echo "Please place $MODULE_FILE in the same directory as this script." >&2
+    exit 1
+fi
+
+# --- 3. Determine Install Path ---
+KERNEL_VER=$(uname -r)
+# We use the 'extra' directory, which is standard for third-party modules.
+INSTALL_PATH="/lib/modules/${KERNEL_VER}/extra"
+
+echo "Installing $MODULE_FILE for kernel $KERNEL_VER..."
+
+# --- 4. Create Directory and Install ---
+echo " -> Creating directory: $INSTALL_PATH"
+mkdir -p "$INSTALL_PATH"
+
+echo " -> Copying module to $INSTALL_PATH"
+# Use 'install' to set correct permissions (644 = rw-r--r--)
+install -m 644 "$MODULE_FILE" "$INSTALL_PATH/"
+
+# --- 5. Update Module Dependencies ---
+echo " -> Running 'depmod -a' (updating module dependencies)..."
+depmod -a
+
+# --- 6. Configure Auto-load ---
+# This creates a file in /etc/modules-load.d/
+CONF_FILE="/etc/modules-load.d/${MODULE_NAME}.conf"
+echo " -> Configuring module to load on boot (at $CONF_FILE)..."
+echo "$MODULE_NAME" > "$CONF_FILE"
+chmod 644 "$CONF_FILE"
+
+echo ""
+echo "--- Installation Finished ---"
+echo "Attempting to load module '$MODULE_NAME' now..."
+
+# --- 7. Try to load the module right now ---
+if modprobe "$MODULE_NAME"; then
+    echo ">Successfully installed and loaded '$MODULE_NAME'."
+    echo ">It will now load automatically on every system boot."
+    echo ">You can check it with 'lsmod | grep $MODULE_NAME'"
+else
+    echo "!Module was installed and configured, but 'modprobe $MODULE_NAME' failed." >&2
+    echo "!This may be due to a compatibility issue or unmet dependencies." >&2
+    echo "!A reboot may be required to load it." >&2
+fi

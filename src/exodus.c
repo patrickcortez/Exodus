@@ -36,6 +36,9 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
+#include <dirent.h>
+
 
 #define PID_FILE "/tmp/exodus.pid"
 
@@ -499,7 +502,52 @@ typedef struct __attribute__((packed)) {
 // Special marker for the end of the archive
 static const uint64_t ENODE_EOF_MARKER = 0xDEADBEEFCAFED00D;
 
+static int get_home_from_uid(uid_t uid, char* home_buf, size_t home_size) {
+    FILE* f = fopen("/etc/passwd", "r");
+    if (!f) {
+        perror("[exodus] Error: Could not open /etc/passwd");
+        return -1;
+    }
+    char line[1024];
+    char* saveptr;
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = 0;
+        char* line_copy = strdup(line);
+        if (line_copy == NULL) continue;
 
+        strtok_r(line_copy, ":", &saveptr); // name
+        strtok_r(NULL, ":", &saveptr);      // pass
+        char* uid_str = strtok_r(NULL, ":", &saveptr);
+
+        if (uid_str && atoi(uid_str) == (int)uid) {
+            strtok_r(NULL, ":", &saveptr); // gid
+            strtok_r(NULL, ":", &saveptr); // gecos
+            char* home_dir = strtok_r(NULL, ":", &saveptr);
+            if (home_dir) {
+                strncpy(home_buf, home_dir, home_size - 1);
+                home_buf[home_size - 1] = '\0';
+                found = 1;
+            }
+            free(line_copy);
+            break;
+        }
+        free(line_copy);
+    }
+    fclose(f);
+    return found ? 0 : -1;
+}
+
+// Gets the owner UID of the node path itself
+static int get_user_uid_from_path(const char* path, uid_t* user_id) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        perror("[exodus] stat failed on node path");
+        return -1;
+    }
+    *user_id = st.st_uid;
+    return 0;
+}
 
 int get_executable_dir(char* buffer, size_t size) {
     char path_buf[PATH_MAX];
@@ -756,49 +804,229 @@ int find_node_path_in_config(const char* node_name, char* path_buffer, size_t bu
     return result;
 }
 
+static int get_current_subsection(const char* node_path, char* subsec_buffer, size_t buffer_size) {
+    char subsec_file_path[PATH_MAX];
+    snprintf(subsec_file_path, sizeof(subsec_file_path), "%s/.log/CURRENT_SUBSECTION", node_path);
+
+    FILE* f = fopen(subsec_file_path, "r");
+    if (!f) {
+        // File doesn't exist, default to "master"
+        strncpy(subsec_buffer, "master", buffer_size - 1);
+        subsec_buffer[buffer_size - 1] = '\0';
+        return 0; // Not an error, just default
+    }
+
+    if (fgets(subsec_buffer, buffer_size, f) == NULL) {
+        fclose(f);
+        // File is empty or unreadable, default to "master"
+        strncpy(subsec_buffer, "master", buffer_size - 1);
+        subsec_buffer[buffer_size - 1] = '\0';
+        return 0;
+    }
+    fclose(f);
+    subsec_buffer[strcspn(subsec_buffer, "\n")] = 0; // Remove newline
+    
+    if (strlen(subsec_buffer) == 0) {
+        // File was empty, default to "master"
+        strncpy(subsec_buffer, "master", buffer_size - 1);
+        subsec_buffer[buffer_size - 1] = '\0';
+    }
+    
+    return 0;
+}
+
+static int parse_node_path(const char* input_str, const char* default_node, 
+                           char* out_node, size_t node_size, 
+                           char* out_path, size_t path_size) {
+    const char* colon = strchr(input_str, ':');
+    if (colon) {
+        // Inter-node format: "Node:path"
+        size_t node_len = colon - input_str;
+        if (node_len >= node_size) node_len = node_size - 1;
+        strncpy(out_node, input_str, node_len);
+        out_node[node_len] = '\0';
+        
+        const char* path_start = colon + 1;
+        strncpy(out_path, path_start, path_size - 1);
+        out_path[path_size - 1] = '\0';
+    } else {
+        // Intra-node format: "path"
+        strncpy(out_node, default_node, node_size - 1);
+        out_node[node_size - 1] = '\0';
+        
+        strncpy(out_path, input_str, path_size - 1);
+        out_path[path_size - 1] = '\0';
+    }
+    
+    // Basic validation
+    if (out_node[0] == '\0' || out_path[0] == '\0') {
+        return -1; // Invalid format
+    }
+    return 0;
+}
+
+static void run_node_man(int argc, char* argv[]) {
+    if (argc < 5) {
+        fprintf(stderr, "Usage: exodus node-man <node_name> <operation> [args...]\n");
+        fprintf(stderr, "Operations:\n");
+        fprintf(stderr, "  --create <file|dir> <path/to/create>\n");
+        fprintf(stderr, "  --delete <path/to/delete>\n");
+        fprintf(stderr, "  --move <src_path> <dest_path_or_node:path>\n");
+        fprintf(stderr, "  --copy <src_path> <dest_path_or_node:path>\n");
+        return;
+    }
+
+    char* context_node = argv[2];
+    char* operation = argv[3];
+
+    cortez_mesh_t* mesh = cortez_mesh_init("exodus_client", NULL);
+    if (!mesh) {
+        fprintf(stderr, "Could not connect to exodus mesh. Are daemons running?\n");
+        return;
+    }
+    usleep(200000); 
+    pid_t target_pid = find_query_daemon_pid();
+    if (target_pid == 0) {
+         fprintf(stderr, "Could not find the query daemon.\n");
+         cortez_mesh_shutdown(mesh);
+         return;
+    }
+
+    void* req_payload = NULL;
+    uint32_t payload_size = 0;
+    uint16_t msg_type = 0;
+
+    if (strcmp(operation, "--create") == 0 && argc == 6) {
+        node_man_create_req_t req = {0};
+        strncpy(req.node_name, context_node, sizeof(req.node_name) - 1);
+        strncpy(req.path, argv[5], sizeof(req.path) - 1);
+        if (strcmp(argv[4], "dir") == 0) {
+            req.is_directory = 1;
+        } else if (strcmp(argv[4], "file") != 0) {
+            fprintf(stderr, "Error: --create type must be 'file' or 'dir'.\n");
+            cortez_mesh_shutdown(mesh);
+            return;
+        }
+        
+        msg_type = MSG_NODE_MAN_CREATE;
+        payload_size = sizeof(req);
+        req_payload = malloc(payload_size);
+        memcpy(req_payload, &req, payload_size);
+
+    } else if (strcmp(operation, "--delete") == 0 && argc == 5) {
+        node_man_delete_req_t req = {0};
+        strncpy(req.node_name, context_node, sizeof(req.node_name) - 1);
+        strncpy(req.path, argv[4], sizeof(req.path) - 1);
+        
+        msg_type = MSG_NODE_MAN_DELETE;
+        payload_size = sizeof(req);
+        req_payload = malloc(payload_size);
+        memcpy(req_payload, &req, payload_size);
+
+    } else if ((strcmp(operation, "--move") == 0 || strcmp(operation, "--copy") == 0) && argc == 6) {
+        node_man_move_copy_req_t req = {0};
+        
+        // Source is always relative to the context node
+        strncpy(req.src_node, context_node, sizeof(req.src_node) - 1);
+        strncpy(req.src_path, argv[4], sizeof(req.src_path) - 1);
+
+        // Destination can be relative or inter-node
+        if (parse_node_path(argv[5], context_node, req.dest_node, sizeof(req.dest_node), req.dest_path, sizeof(req.dest_path)) != 0) {
+            fprintf(stderr, "Error: Invalid destination format '%s'.\n", argv[5]);
+            cortez_mesh_shutdown(mesh);
+            return;
+        }
+
+        msg_type = (strcmp(operation, "--move") == 0) ? MSG_NODE_MAN_MOVE : MSG_NODE_MAN_COPY;
+        payload_size = sizeof(req);
+        req_payload = malloc(payload_size);
+        memcpy(req_payload, &req, payload_size);
+
+    } else {
+        fprintf(stderr, "Error: Invalid operation or argument count for 'node-man'.\n");
+        cortez_mesh_shutdown(mesh);
+        return;
+    }
+
+    // Send the request
+    int sent_ok = 0;
+    for (int i = 0; i < 5; i++) {
+        cortez_write_handle_t* h = cortez_mesh_begin_send_zc(mesh, target_pid, payload_size);
+        if (h) {
+            size_t part1_size;
+            void* buffer = cortez_write_handle_get_part1(h, &part1_size);
+            memcpy(buffer, req_payload, payload_size); // Assuming payload fits in part1
+            cortez_mesh_commit_send_zc(h, msg_type);
+            sent_ok = 1;
+            break;
+        }
+        usleep(200000);
+    }
+    
+    free(req_payload); // Free the heap-allocated payload
+
+    if (sent_ok) {
+        printf("Waiting for response...\n");
+        cortez_msg_t* msg = cortez_mesh_read(mesh, 10000);
+        if(msg) {
+            if(cortez_msg_type(msg) == MSG_OPERATION_ACK) {
+                const ack_t* ack = cortez_msg_payload(msg);
+                printf("Result: %s (%s)\n", ack->success ? "Success" : "Failure", ack->details);
+            }
+            cortez_mesh_msg_release(mesh, msg);
+        } else {
+            printf("No response from daemon (timeout).\n");
+        }
+    } else {
+         fprintf(stderr, "Failed to send message to query daemon.\n");
+    }
+    
+    cortez_mesh_shutdown(mesh);
+}
+
 static void run_node_edit() {
     char exe_dir[PATH_MAX];
     if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) {
-        fprintf(stderr, "Error: Could not determine executable directory to find exodus-gui.\n");
+        fprintf(stderr, "Error: Could not determine executable directory to find exodus-tui.\n");
         return;
     }
 
     char gui_path[PATH_MAX];
-    snprintf(gui_path, sizeof(gui_path), "%s/exodus-gui", exe_dir);
+    snprintf(gui_path, sizeof(gui_path), "%s/exodus-tui", exe_dir);
 
     // Check if the GUI executable exists and is executable
     if (access(gui_path, X_OK) != 0) {
-        fprintf(stderr, "Error: 'exodus-gui' not found or not executable.\n");
-        fprintf(stderr, "Please ensure 'exodus-gui' is in the same directory as 'exodus':\n%s\n", gui_path);
+        fprintf(stderr, "Error: 'exodus-tui' not found or not executable.\n");
+        fprintf(stderr, "Please ensure 'exodus-tui' is in the same directory as 'exodus':\n%s\n", gui_path);
         return;
     }
 
     pid_t pid = fork();
     if (pid == 0) { 
 
-        setsid(); 
-
-        // Close standard file descriptors to run in background
-        close(STDIN_FILENO);
-        close(STDOUT_FILENO);
-        close(STDERR_FILENO);
-
-        // Execute the GUI
-        execl(gui_path, "exodus-gui", (char*)NULL);
+        execl(gui_path, "exodus-tui", (char*)NULL);
         
-        // If execl returns, an error occurred (we can't print it, but we exit)
+        // If execl returns, an error occurred
+        perror("execl exodus-tui failed");
         exit(1); 
     
     } else if (pid < 0) {
-
-        perror("fork for exodus-gui failed");
+        // --- FORK ERROR ---
+        perror("fork for exodus-tui failed");
         return;
     
     } else {
-
-        printf("Launching Exodus GUI... (PID: %d)\n", pid);
+        // --- PARENT PROCESS ---
+        printf("Launching Exodus TUI... (PID: %d)\n", pid);
+        
+        // Wait for the child process (the TUI) to finish
+        int status;
+        waitpid(pid, &status, 0);
+        
+        printf("Exodus TUI exited.\n");
     }
 }
+
 
 // --- NEW: Simple cross-platform getpass ---
 static char* getpass_custom(const char* prompt) {
@@ -932,11 +1160,40 @@ static int ftw_pack_callback(const char* fpath, const struct stat* sb, int typef
     return 0; // Continue
 }
 
+static void run_clean_history(int argc, char* argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "Usage: exodus clean <node_name>\n");
+        return;
+    }
+    char* node_name = argv[2];
+    char node_path[PATH_MAX];
+
+    if (find_node_path_in_config(node_name, node_path, sizeof(node_path)) != 0) {
+        return; // Error message already printed by the function
+    }
+
+    char history_path[PATH_MAX];
+    snprintf(history_path, sizeof(history_path), "%s/.log/history.json", node_path);
+
+    // Open in "w" mode to truncate the file to zero bytes
+    FILE* f = fopen(history_path, "w");
+    if (!f) {
+        perror("Error: Could not open history.json to clear it");
+        fprintf(stderr, "Path: %s\n", history_path);
+        return;
+    }
+    
+    fclose(f);
+
+    printf("Successfully cleared uncommitted history for node '%s'.\n", node_name);
+}
+
 static void run_node_conf(int argc, char* argv[]) {
     if (argc < 4) {
         fprintf(stderr, "Usage: exodus node-conf <node_name> [options...]\n");
         fprintf(stderr, "Options:\n");
         fprintf(stderr, "  --auto <0|1>                Enable or disable auto-surveillance guardian.\n");
+        fprintf(stderr, "  -h <1>                      (With --auto) Use headless (systemd) mode instead of XDG (desktop).\n");
         fprintf(stderr, "  --time <Unix|Real>          Set event timestamp format (Unix timestamp or Realtime string).\n");
         fprintf(stderr, "  --filter [.ext1 .ext2 ...]  Set file extensions to auto-delete (guardian only).\n");
         return;
@@ -979,22 +1236,38 @@ static void run_node_conf(int argc, char* argv[]) {
     int i = 3;
     int auto_changed = 0; // Flag to track if --auto was specified
     int new_auto_val = 0;
+    int is_headless = 0; // Flag for systemd mode
 
     while (i < argc) {
         if (strcmp(argv[i], "--auto") == 0) {
             if (i + 1 < argc) {
-                int is_auto = atoi(argv[i + 1]);
-                if (is_auto == 0 || is_auto == 1) {
-                    snprintf(conf_auto, sizeof(conf_auto), "auto=%d", is_auto);
-                    printf("Setting auto=%d\n", is_auto);
+                // --- Use strcmp, not atoi, to validate input ---
+                if (strcmp(argv[i + 1], "0") == 0) {
+                    snprintf(conf_auto, sizeof(conf_auto), "auto=0");
+                    printf("Setting auto=0\n");
                     auto_changed = 1;
-                    new_auto_val = is_auto;
+                    new_auto_val = 0;
+                    i += 2; // Consume both
+                } else if (strcmp(argv[i + 1], "1") == 0) {
+                    snprintf(conf_auto, sizeof(conf_auto), "auto=1");
+                    printf("Setting auto=1\n");
+                    auto_changed = 1;
+                    new_auto_val = 1;
+                    i += 2; // Consume both
                 } else {
-                    fprintf(stderr, "Error: --auto value must be 0 or 1.\n");
+                    fprintf(stderr, "Error: --auto value must be 0 or 1. Got '%s'.\n", argv[i+1]);
+                    i++; // Only consume '--auto'
+                    continue; 
                 }
-                i += 2;
             } else {
                  fprintf(stderr, "Error: --auto requires an argument.\n"); i++;
+            }
+        } else if (strcmp(argv[i], "-h") == 0) {
+            if (i + 1 < argc && strcmp(argv[i+1], "1") == 0) {
+                is_headless = 1;
+                i += 2;
+            } else {
+                fprintf(stderr, "Error: -h requires '1' as an argument.\n"); i++;
             }
         } else if (strcmp(argv[i], "--time") == 0) {
             if (i + 1 < argc) {
@@ -1049,98 +1322,165 @@ static void run_node_conf(int argc, char* argv[]) {
 
     printf("Node '%s' config updated at '%s'.\n", node_name, conf_path);
 
-    // 4. Handle XDG Autostart logic only if --auto was specified
+    // 4. Handle Autostart logic
     if (auto_changed) {
-        char exec_path[PATH_MAX];
-        char autostart_dir[PATH_MAX];
-        char desktop_file_path[PATH_MAX];
+        char exec_path[PATH_MAX]; // Path to the guardian executable
         char cmd[PATH_MAX * 2];
-        const char* home_dir = getenv("HOME");
-
-        if (!home_dir) {
-            fprintf(stderr, "Error: HOME environment variable not set. Cannot manage XDG autostart.\n");
+        
+        // Find and copy the guardian executable (common to both modes)
+        char exe_dir[PATH_MAX];
+        if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) {
+            fprintf(stderr, "  Error: Could not determine executable directory.\n");
             return;
         }
-
-        // Define paths for the guardian executable and the .desktop file
+        char guardian_source_path[PATH_MAX];
+        snprintf(guardian_source_path, sizeof(guardian_source_path), "%s/exodus-node-guardian", exe_dir);
         snprintf(exec_path, sizeof(exec_path), "%s/.log/%s-guardian", node_path, node_name);
-        snprintf(autostart_dir, sizeof(autostart_dir), "%s/.config/autostart", home_dir);
-        snprintf(desktop_file_path, sizeof(desktop_file_path), "%s/exodus-guardian-%s.desktop", autostart_dir, node_name);
+        
+        snprintf(cmd, sizeof(cmd), "cp \"%s\" \"%s\"", guardian_source_path, exec_path);
+        if (system(cmd) != 0) {
+            fprintf(stderr, "  Error: Failed to copy 'exodus-node-guardian' to '%s'.\n", exec_path);
+            fprintf(stderr, "  Make sure 'exodus-node-guardian' is compiled and in the same directory as 'exodus'.\n");
+            return;
+        }
+        snprintf(cmd, sizeof(cmd), "chmod +x \"%s\"", exec_path);
+        system(cmd);
 
-        if (new_auto_val == 1) {
-            printf("Enabling XDG Autostart for node '%s'...\n", node_name);
+        // Find the correct user and home directory based on the node's path
+        uid_t node_owner_uid;
+        char node_owner_home[PATH_MAX];
+        const char* home_dir_fallback = getenv("HOME");
+        if (home_dir_fallback == NULL) home_dir_fallback = "/tmp";
 
-            // Find and copy the guardian executable
-            char exe_dir[PATH_MAX];
-            if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) {
-                fprintf(stderr, "  Error: Could not determine executable directory.\n");
-                return;
-            }
-            char guardian_source_path[PATH_MAX];
-            snprintf(guardian_source_path, sizeof(guardian_source_path), "%s/exodus-node-guardian", exe_dir);
+        if (get_user_uid_from_path(node_path, &node_owner_uid) != 0 || get_home_from_uid(node_owner_uid, node_owner_home, sizeof(node_owner_home)) != 0) {
+            fprintf(stderr, "Warning: Could not determine node owner's home directory. Fallback to $HOME.\n");
+            strncpy(node_owner_home, home_dir_fallback, sizeof(node_owner_home));
+            node_owner_uid = getuid(); 
+        }
 
-            snprintf(cmd, sizeof(cmd), "cp \"%s\" \"%s\"", guardian_source_path, exec_path);
-            if (system(cmd) != 0) {
-                fprintf(stderr, "  Error: Failed to copy 'exodus-node-guardian' to '%s'.\n", exec_path);
-                fprintf(stderr, "  Make sure 'exodus-node-guardian' is compiled and in the same directory as 'exodus'.\n");
-                return;
-            }
-            snprintf(cmd, sizeof(cmd), "chmod +x \"%s\"", exec_path);
-            system(cmd);
-
-            // Create autostart directory
-            snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", autostart_dir);
-            system(cmd);
-
-            // Create and write .desktop file
-            const char* desktop_template = 
-                "[Desktop Entry]\n"
-                "Type=Application\n"
-                "Name=Exodus Guardian (%s)\n"
-                "Comment=Exodus self-surveillance for node %s\n"
-                "Exec=%s\n"
-                "Terminal=false\n"
-                "X-GNOME-Autostart-enabled=true\n";
+        if (is_headless) {
+            printf("Headless mode (-h 1) detected. Configuring systemd --user service...\n");
             
-            char desktop_content[2048];
-            snprintf(desktop_content, sizeof(desktop_content), desktop_template, node_name, node_name, exec_path);
+            char systemd_dir_path[PATH_MAX];
+            char service_file_path[PATH_MAX];
             
-            f = fopen(desktop_file_path, "w");
-            if (!f) { perror("  Error writing .desktop file"); return; }
-            fprintf(f, "%s", desktop_content);
-            fclose(f);
+            // Use the robust home path
+            snprintf(systemd_dir_path, sizeof(systemd_dir_path), "%s/.config/systemd/user", node_owner_home); 
+            snprintf(service_file_path, sizeof(service_file_path), "%s/%s.service", systemd_dir_path, node_name);
 
-            // Start the service *now* for the current session by forking
-            printf("  Starting guardian for current session...\n");
-            pid_t pid = fork();
-            if (pid == 0) {
-                // Child process
-                execl(exec_path, exec_path, (char*)NULL);
-                perror("  execl failed"); // Should not be reached
-                exit(1);
-            } else if (pid < 0) {
-                perror("  fork failed");
+            if (new_auto_val == 1) {
+                // Create systemd user directory
+                snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", systemd_dir_path);
+                system(cmd);
+
+                // Create and write the service file
+                const char* service_template =
+                    "[Unit]\n"
+                    "Description=Exodus Self-Surveillance Guardian for %s\n"
+                    "After=network.target\n\n" // Using network.target from your old code
+                    "[Service]\n"
+                    "ExecStart=%s\n"
+                    "Restart=always\n"
+                    "RestartSec=10\n\n" // Using 10s from your old code
+                    "[Install]\n"
+                    "WantedBy=default.target\n";
+                
+                char service_content[2048];
+                snprintf(service_content, sizeof(service_content), service_template, node_name, exec_path);
+                
+                f = fopen(service_file_path, "w");
+                if (!f) { perror("  Error writing systemd service file"); return; }
+                fprintf(f, "%s", service_content);
+                fclose(f);
+                
+                printf("  Reloading systemd user daemon...\n");
+                system("systemctl --user daemon-reload");
+                snprintf(cmd, sizeof(cmd), "systemctl --user enable %s.service", node_name);
+                system(cmd);
+                snprintf(cmd, sizeof(cmd), "systemctl --user start %s.service", node_name);
+                system(cmd);
+                
+                printf("Successfully enabled auto-surveillance for '%s'.\n", node_name);
+                printf("Manage with: systemctl --user status %s.service\n", node_name);
+
+            } else {
+                printf("Disabling auto-surveillance for node '%s'...\n", node_name);
+                
+                // --- Using the simple logic from your "old" version ---
+                snprintf(cmd, sizeof(cmd), "systemctl --user stop %s.service", node_name);
+                system(cmd);
+                snprintf(cmd, sizeof(cmd), "systemctl --user disable %s.service", node_name);
+                system(cmd);
+                // --- End simple logic ---
+
+                remove(service_file_path);
+                remove(exec_path);
+                
+                printf("  Reloading systemd user daemon...\n");
+                system("systemctl --user daemon-reload");
+                printf("Successfully disabled auto-surveillance for '%s'.\n", node_name);
             }
-            // Parent continues
-            printf("Successfully enabled auto-surveillance for '%s'.\n", node_name);
 
         } else {
-            printf("Disabling auto-surveillance for node '%s'...\n", node_name);
-            
-            // Stop the running process using pkill.
-            // We use -f to match the full path, making it very specific.
-            printf("  Stopping running guardian process...\n");
-            snprintf(cmd, sizeof(cmd), "pkill -f \"%s\"", exec_path);
-            system(cmd);
-            
-            // Give it a moment to terminate gracefully
-            sleep(1);
 
-            // Remove .desktop file and executable
-            remove(desktop_file_path);
-            remove(exec_path);
-            
-            printf("Successfully disabled auto-surveillance for '%s'.\n", node_name);
+            printf("Desktop mode detected. Configuring XDG Autostart...\n");
+
+            char autostart_dir[PATH_MAX];
+            char desktop_file_path[PATH_MAX];
+            snprintf(autostart_dir, sizeof(autostart_dir), "%s/.config/autostart", node_owner_home);
+            snprintf(desktop_file_path, sizeof(desktop_file_path), "%s/exodus-guardian-%s.desktop", autostart_dir, node_name);
+
+            if (new_auto_val == 1) {
+                // Create autostart directory
+                snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", autostart_dir);
+                system(cmd);
+
+                // Create and write .desktop file
+                const char* desktop_template = 
+                    "[Desktop Entry]\n"
+                    "Type=Application\n"
+                    "Name=Exodus Guardian (%s)\n"
+                    "Comment=Exodus self-surveillance for node %s\n"
+                    "Exec=%s\n"
+                    "Terminal=false\n"
+                    "X-GNOME-Autostart-enabled=true\n";
+                
+                char desktop_content[2048];
+                snprintf(desktop_content, sizeof(desktop_content), desktop_template, node_name, node_name, exec_path);
+                
+                f = fopen(desktop_file_path, "w");
+                if (!f) { perror("  Error writing .desktop file"); return; }
+                fprintf(f, "%s", desktop_content);
+                fclose(f);
+
+                // Start the service *now* for the current session by forking
+                printf("  Starting guardian for current session...\n");
+                pid_t pid = fork();
+                if (pid == 0) {
+                    if (setuid(node_owner_uid) != 0) exit(1); // Drop privileges
+                    execl(exec_path, exec_path, (char*)NULL);
+                    perror("  execl failed");
+                    exit(1);
+                } else if (pid < 0) {
+                    perror("  fork failed");
+                }
+                printf("Successfully enabled auto-surveillance for '%s'.\n", node_name);
+
+            } else {
+                printf("Disabling auto-surveillance for node '%s'...\n", node_name);
+                
+                printf("  Stopping running guardian process...\n");
+                snprintf(cmd, sizeof(cmd), "pkill -f \"%s\"", exec_path);
+                system(cmd);
+                
+                sleep(1);
+
+                // Remove .desktop file and executable
+                remove(desktop_file_path);
+                remove(exec_path);
+                
+                printf("Successfully disabled auto-surveillance for '%s'.\n", node_name);
+            }
         }
     }
 }
@@ -1172,23 +1512,20 @@ static void run_pack(int argc, char* argv[]) {
         fprintf(stderr, "Password cannot be empty. Aborting.\n"); 
         return; 
     }
-    // Copy the first password into our local buffer
     strncpy(password_buffer, password_ptr, sizeof(password_buffer) - 1);
     password_buffer[sizeof(password_buffer) - 1] = '\0';
     
     char* password_confirm = getpass_custom("Verify password: ");
     
-    // Compare the local buffer (password 1) with the static buffer (password 2)
     if (strcmp(password_buffer, password_confirm) != 0) { 
         fprintf(stderr, "Passwords do not match. Aborting.\n"); 
         return; 
     }
     
     uint8_t key[SHA256_BLOCK_SIZE];
-    // Generate the key from the verified, first password
     generate_key_from_password(password_buffer, key);
 
-    // --- Pass 1: Write all data to a temporary file ---
+    // --- Pass 1: Write all data unencrypted to a temporary file ---
     g_pack_file_temp = fopen(tmp_file, "wb");
     if (!g_pack_file_temp) { perror("Error opening temp file"); return; }
     
@@ -1206,66 +1543,33 @@ static void run_pack(int argc, char* argv[]) {
     // Write EOF marker to temp file
     uint64_t eof_marker = ENODE_EOF_MARKER;
     fwrite(&eof_marker, sizeof(eof_marker), 1, g_pack_file_temp);
-    fclose(g_pack_file_temp);
+    fclose(g_pack_file_temp); // Close temp file
 
-    // --- Pass 2: Encrypt the temporary file to the final file ---
+    // --- Pass 2: Stream-encrypt from the temporary file to the final file ---
     printf("Encrypting archive...\n");
-    FILE* f_tmp_in = fopen(tmp_file, "rb");
+    FILE* f_tmp_in = fopen(tmp_file, "rb"); // Re-open temp file for reading
     if (!f_tmp_in) { perror("Error reading temp file"); remove(tmp_file); return; }
     
-    fseek(f_tmp_in, 0, SEEK_END);
-    size_t tmp_size = ftell(f_tmp_in);
-    fseek(f_tmp_in, 0, SEEK_SET);
+    FILE* f_out = fopen(out_file, "wb"); // Open final output file
+    if (!f_out) { perror("Error opening output file"); fclose(f_tmp_in); remove(tmp_file); return; }
 
-    uint8_t* tmp_data = malloc(tmp_size);
-    if (!tmp_data) {
-        fprintf(stderr, "Out of memory. Aborting.\n");
-        fclose(f_tmp_in); remove(tmp_file); return;
-    }
-    if (fread(tmp_data, 1, tmp_size, f_tmp_in) != tmp_size) {
-        fprintf(stderr, "Error reading temp file data.\n");
-        free(tmp_data); fclose(f_tmp_in); remove(tmp_file); return;
-    }
-    fclose(f_tmp_in);
-    remove(tmp_file); // Temp file no longer needed
-
-    // Pad the data
-    size_t padded_size = pkcs7_pad(&tmp_data, tmp_size);
-    if (padded_size == 0) { fprintf(stderr, "Padding failed.\n"); free(tmp_data); return; }
-    
-    // Generate IV and init AES
-    uint8_t iv[AES_BLOCKLEN];
-    generate_random_iv(iv);
-    struct AES_ctx ctx;
-    AES_init_ctx_iv(&ctx, key, iv);
-    
-    // Encrypt
-    AES_CBC_encrypt_buffer(&ctx, tmp_data, (uint32_t)padded_size);
-    
-    // Write final file
-    FILE* f_out = fopen(out_file, "wb");
-    if (!f_out) { perror("Error opening output file"); free(tmp_data); return; }
-
+    // Prepare Header
     EnodeHeader header = {0};
     strncpy(header.magic, ENODE_MAGIC, sizeof(header.magic));
     strncpy(header.node_name, node_name, sizeof(header.node_name) - 1);
-    memcpy(header.iv, iv, AES_BLOCKLEN);
+    generate_random_iv(header.iv); // Generate IV for the header
 
+    // --- Fill header metadata ---
     char exe_dir[PATH_MAX];
     if (get_executable_dir(exe_dir, sizeof(exe_dir)) == 0) {
         char config_path[PATH_MAX];
         snprintf(config_path, sizeof(config_path), "%s/nodewatch.json", exe_dir);
-        
         FILE* f_conf = fopen(config_path, "r");
         if (f_conf) {
-            fseek(f_conf, 0, SEEK_END);
-            long length = ftell(f_conf);
-            fseek(f_conf, 0, SEEK_SET);
+            fseek(f_conf, 0, SEEK_END); long length = ftell(f_conf); fseek(f_conf, 0, SEEK_SET);
             char* buffer = malloc(length + 1);
             if (buffer) {
-                fread(buffer, 1, length, f_conf);
-                buffer[length] = '\0';
-                
+                fread(buffer, 1, length, f_conf); buffer[length] = '\0';
                 ctz_json_value* root = ctz_json_parse(buffer, NULL, 0);
                 if (root) {
                     ctz_json_value* node_obj = ctz_json_find_object_value(root, node_name);
@@ -1273,13 +1577,10 @@ static void run_pack(int argc, char* argv[]) {
                         ctz_json_value* val;
                         val = ctz_json_find_object_value(node_obj, "author");
                         if (val) strncpy(header.author, ctz_json_get_string(val), sizeof(header.author) - 1);
-                        
                         val = ctz_json_find_object_value(node_obj, "desc");
                         if (val) strncpy(header.desc, ctz_json_get_string(val), sizeof(header.desc) - 1);
-                        
                         val = ctz_json_find_object_value(node_obj, "tag");
                         if (val) strncpy(header.tag, ctz_json_get_string(val), sizeof(header.tag) - 1);
-                        
                         val = ctz_json_find_object_value(node_obj, "current_version");
                         if (val) strncpy(header.current_version, ctz_json_get_string(val), sizeof(header.current_version) - 1);
                     }
@@ -1288,25 +1589,72 @@ static void run_pack(int argc, char* argv[]) {
                 free(buffer);
             }
             fclose(f_conf);
-        } else {
-            fprintf(stderr, "Warning: Could not open nodewatch.json. Metadata will be blank.\n");
-        }
-    } else {
-        fprintf(stderr, "Warning: Could not find nodewatch.json path. Metadata will be blank.\n");
-    }
-    
+        } else { fprintf(stderr, "Warning: Could not open nodewatch.json. Metadata will be blank.\n"); }
+    } else { fprintf(stderr, "Warning: Could not find nodewatch.json path. Metadata will be blank.\n"); }
+    // --- End header metadata ---
+
+    // Write the unencrypted header to the final file
     if (fwrite(&header, sizeof(header), 1, f_out) != 1) {
         fprintf(stderr, "Error writing archive header.\n");
-    } else if (fwrite(tmp_data, 1, padded_size, f_out) != padded_size) {
-        fprintf(stderr, "Error writing encrypted data.\n");
-    } else {
-        printf("\nSuccessfully packed and encrypted node to '%s'.\n", out_file);
+        fclose(f_tmp_in); fclose(f_out); remove(tmp_file); return;
+    }
+
+    // --- Start streaming encryption ---
+    struct AES_ctx ctx;
+    AES_init_ctx_iv(&ctx, key, header.iv); // Init AES with the IV from the header
+
+    uint8_t buffer[4096]; // 4KB chunk buffer
+    size_t bytes_read;
+    
+    while (1) {
+        bytes_read = fread(buffer, 1, sizeof(buffer), f_tmp_in);
+        
+        if (bytes_read == 4096) {
+            // Full chunk - encrypt and write
+            AES_CBC_encrypt_buffer(&ctx, buffer, (uint32_t)bytes_read);
+            if (fwrite(buffer, 1, bytes_read, f_out) != bytes_read) {
+                fprintf(stderr, "Error writing encrypted data chunk.\n");
+                break; // Exit loop on error
+            }
+        } else {
+            // Last chunk (could be 0 to 4095 bytes)
+            size_t final_data_len = bytes_read;
+            size_t pad_len = AES_BLOCKLEN - (final_data_len % AES_BLOCKLEN);
+            size_t padded_final_size = final_data_len + pad_len;
+
+            // Use a temporary buffer for this final padded block
+            uint8_t* final_buf = malloc(padded_final_size);
+            if (!final_buf) {
+                fprintf(stderr, "Out of memory for final padding.\n");
+                break;
+            }
+            
+            // Copy the last bytes
+            memcpy(final_buf, buffer, final_data_len);
+            
+            // Apply PKCS7 padding
+            for (size_t i = 0; i < pad_len; i++) {
+                final_buf[final_data_len + i] = (uint8_t)pad_len;
+            }
+            
+            // Encrypt and write the final padded block
+            AES_CBC_encrypt_buffer(&ctx, final_buf, (uint32_t)padded_final_size);
+            if (fwrite(final_buf, 1, padded_final_size, f_out) != padded_final_size) {
+                 fprintf(stderr, "Error writing final encrypted chunk.\n");
+            } else {
+                printf("\nSuccessfully packed and encrypted node to '%s'.\n", out_file);
+            }
+            
+            free(final_buf);
+            break; // End of file, break from loop
+        }
     }
     
+    // --- Cleanup ---
     fclose(f_out);
-    free(tmp_data);
+    fclose(f_tmp_in);
+    remove(tmp_file);
 }
-
 
 static void run_unpack(int argc, char* argv[]) {
     if (argc != 3) {
@@ -1786,10 +2134,74 @@ static void run_pack_info(int argc, char* argv[]) {
     #undef print_field
 }
 
+static void print_detailed_usage(void) {
+    fprintf(stderr, "usage: exodus <command> [<args>...]\n\n");
+
+    fprintf(stderr, "Daemon & Service Management\n");
+    fprintf(stderr, "  %-12s Start the Exodus cloud and query daemons\n", "start");
+    fprintf(stderr, "  %-12s Stop the Exodus daemons\n", "stop");
+    fprintf(stderr, "\n");
+
+    fprintf(stderr, "Node Configuration & TUI\n");
+    fprintf(stderr, "  %-12s Configure a node's auto-surveillance and settings\n", "node-conf");
+    fprintf(stderr, "  %-12s Show uncommitted changes for a node\n", "node-status");
+    fprintf(stderr, "  %-12s Open the TUI to browse and edit files in nodes with built in Text Editor\n", "node-edit");
+    fprintf(stderr, "  %-12s Create, delete, move, or copy files/dirs within a node\n", "node-man");
+    fprintf(stderr, "\n");
+
+    fprintf(stderr, "Snapshot & History Management\n");
+    fprintf(stderr, "  %-12s Create a permanent, versioned snapshot of a node\n", "commit");
+    fprintf(stderr, "  %-12s Restore a node to a specific snapshot version (destructive)\n", "rebuild");
+    fprintf(stderr, "  %-12s Restore a single file from a specific snapshot\n", "checkout");
+    fprintf(stderr, "  %-12s Show changes between two snapshot versions\n", "diff");
+    fprintf(stderr, "  %-12s View History of a node(what changed in a node e.g: Modified, Created, Moved or Deleted)\n", "history");
+    fprintf(stderr, "  %-12s Show the commit history for the active subsection\n", "log");
+    fprintf(stderr, "  %-12s Clear the uncommitted change history for a node\n", "clean");
+    fprintf(stderr, "\n");
+
+    fprintf(stderr, "Subsection (Branch) Management\n");
+    fprintf(stderr, "  %-12s List all subsections for a node\n", "list-subs");
+    fprintf(stderr, "  %-12s Create a new subsection\n", "add-subs");
+    fprintf(stderr, "  %-12s Remove a subsection (cannot remove 'master' or active subsection)\n", "remove-subs");
+    fprintf(stderr, "  %-12s Switch active subsection (rebuilds node to new subsection's HEAD)\n", "switch");
+    fprintf(stderr, "  %-12s Promote (merge) a subsection into 'master' (Trunk)\n", "promote");
+    fprintf(stderr, "\n");
+
+    fprintf(stderr, "Archiving & Data Transfer\n");
+    fprintf(stderr, "  %-12s Encrypt and archive a node into a .enode file\n", "pack");
+    fprintf(stderr, "  %-12s Decrypt and extract a .enode file\n", "unpack");
+    fprintf(stderr, "  %-12s Show metadata from an encrypted .enode file header\n", "pack-info");
+    fprintf(stderr, "  %-12s Send a .enode file to a remote receiver\n", "send");
+    fprintf(stderr, "  %-12s Start a receiver to accept .enode files\n", "expose-node");
+    fprintf(stderr, "\n");
+
+    fprintf(stderr, "Node Management\n");
+    fprintf(stderr, "  %-12s Adds your project/directory as a new node\n", "add-node");
+    fprintf(stderr, "  %-12s List all added nodes\n", "list-nodes");
+    fprintf(stderr, "  %-12s Deletes a node and remove it from the config\n", "remove-node");
+    fprintf(stderr, "  %-12s View recent events of a node\n", "view-node");
+    fprintf(stderr, "  %-12s Start real-time surveillance on an inactive node\n", "activate");
+    fprintf(stderr, "  %-12s Stop real-time surveillance on an active node\n", "deactivate");
+    fprintf(stderr, "  %-12s Set metadata (author, tag, desc) for a node\n", "attr-node");
+    fprintf(stderr, "  %-12s View metadata for a node\n", "info-node");
+    fprintf(stderr, "  %-12s Find nodes by author or tag\n", "search-attr");
+    fprintf(stderr, "  %-12s Find a file/folder, or pin it with 'look <file> --pin <name>'\n", "look");
+    fprintf(stderr, "  %-12s Remove a pinned shortcut\n", "unpin");
+    fprintf(stderr, "\n");
+    
+    fprintf(stderr, "File Indexing\n");
+    fprintf(stderr, "  %-12s Upload a file for word indexing\n", "upload");
+    fprintf(stderr, "  %-12s Find a word in the last indexed file\n", "find");
+    fprintf(stderr, "  %-12s Find and replace a word in the last indexed file\n", "change");
+    fprintf(stderr, "  %-12s Get the word count of the last indexed file\n", "wc");
+    fprintf(stderr, "  %-12s Get the line count of the last indexed file\n", "wl");
+    fprintf(stderr, "  %-12s Get the non-space character count of the last indexed file\n", "cc");
+    fprintf(stderr, "\n");
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        
-        fprintf(stderr, "Usage: exodus <start|stop|pack|unpack|pack-info|send|expose-node|commit|rebuild|history|node-status|node-conf|node-edit|look|unpin|upload|find|change|wc|wl|cc|add-node|list-nodes|view-node|activate|deactivate|remove-node|attr-node|info-node|search-attr> [args...]\n");
+        print_detailed_usage();
         return 1;
     }
 
@@ -1819,40 +2231,327 @@ int main(int argc, char* argv[]) {
     } else if (strcmp(argv[1], "node-conf") == 0) {
         run_node_conf(argc, argv);
 
-    }else if (strcmp(argv[1], "node-edit") == 0) {
+    }else if (strcmp(argv[1], "clean") == 0) {
+        run_clean_history(argc, argv);
+
+    } else if (strcmp(argv[1], "node-edit") == 0) {
         if (argc != 2) {
             fprintf(stderr, "Usage: exodus node-edit\n");
             return 1;
         }
         run_node_edit();
     
-    } else if (strcmp(argv[1], "commit") == 0) {
-        if (argc != 4) {
-            fprintf(stderr, "Usage: exodus commit <node_name> <version_tag>\n");
+    }else if (strcmp(argv[1], "node-man") == 0) {
+        run_node_man(argc, argv);
+    
+    } else if (strcmp(argv[1], "list-subs") == 0) {
+        if (argc != 3) {
+            fprintf(stderr, "Usage: exodus list-subs <node_name>\n");
             return 1;
         }
         char node_path[PATH_MAX];
-        if (find_node_path_in_config(argv[2], node_path, sizeof(node_path)) != 0) {
-            return 1; // find_node_path_in_config prints its own error
-        }
-        printf("Sending 'commit' command for node '%s' with tag '%s'...\n", argv[2], argv[3]);
-        int result = cortez_ipc_send("./exodus_snapshot",
-                                     CORTEZ_TYPE_STRING, "commit",
-                                     CORTEZ_TYPE_STRING, argv[2],
-                                     CORTEZ_TYPE_STRING, node_path,
-                                     CORTEZ_TYPE_STRING, argv[3],
-                                     0); // 0 terminates the argument list
-        if (result == 0) {
-            printf("Snapshot process complete. Check logs for details.\n");
+        if (find_node_path_in_config(argv[2], node_path, sizeof(node_path)) != 0) return 1;
 
+        char subsec_dir_path[PATH_MAX];
+        snprintf(subsec_dir_path, sizeof(subsec_dir_path), "%s/.log/subsections", node_path);
+        
+        DIR* d = opendir(subsec_dir_path);
+        if (!d) {
+            // If dir doesn't exist, 'master' is the only one
+            printf("Subsections for node '%s':\n", argv[2]);
+            printf("* master (Trunk)\n");
+            return 0;
+        }
+
+        char current_subsec[MAX_NODE_NAME_LEN];
+        get_current_subsection(node_path, current_subsec, sizeof(current_subsec));
+
+        printf("Subsections for node '%s':\n", argv[2]);
+        
+        // Always list master
+        if (strcmp("master", current_subsec) == 0) {
+            printf("* master (Trunk)\n");
+        } else {
+            printf("  master (Trunk)\n");
+        }
+
+        struct dirent* dir;
+        while ((dir = readdir(d)) != NULL) {
+            if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0) continue;
+            
+            // Check if it ends in .subsec
+            char* ext = strrchr(dir->d_name, '.');
+            if (ext && strcmp(ext, ".subsec") == 0) {
+                // Get name without extension
+                char sub_name[NAME_MAX + 1];
+                size_t name_len = ext - dir->d_name;
+                strncpy(sub_name, dir->d_name, name_len);
+                sub_name[name_len] = '\0';
+
+                if (strcmp(sub_name, current_subsec) == 0) {
+                    printf("* %s\n", sub_name);
+                } else {
+                    printf("  %s\n", sub_name);
+                }
+            }
+        }
+        closedir(d);
+
+    } else if (strcmp(argv[1], "add-subs") == 0) {
+        if (argc != 4) {
+            fprintf(stderr, "Usage: exodus add-subs <node_name> <new_subsection_name>\n");
+            return 1;
+        }
+        char* node_name = argv[2];
+        char* new_sub_name = argv[3];
+        char node_path[PATH_MAX];
+        if (find_node_path_in_config(node_name, node_path, sizeof(node_path)) != 0) return 1;
+
+        if (strcmp(new_sub_name, "master") == 0) {
+            fprintf(stderr, "Error: Cannot create subsection 'master'. It is reserved.\n");
+            return 1;
+        }
+
+        printf("Sending 'add-subs' command for new subsection '%s'...\n", new_sub_name);
+        int result = cortez_ipc_send("./exodus_snapshot",
+                                     CORTEZ_TYPE_STRING, "add-subs",
+                                     CORTEZ_TYPE_STRING, node_name,
+                                     CORTEZ_TYPE_STRING, node_path,
+                                     CORTEZ_TYPE_STRING, "master",     // Dummy subsection
+                                     CORTEZ_TYPE_STRING, new_sub_name, // arg1
+                                     0);
+        if (result != 0) {
+             fprintf(stderr, "Failed to start add-subs process.\n");
+        }
+
+    } else if (strcmp(argv[1], "remove-subs") == 0) {
+        if (argc != 4) {
+            fprintf(stderr, "Usage: exodus remove-subs <node_name> <subsection_name>\n");
+            return 1;
+        }
+        char* node_name = argv[2];
+        char* sub_name = argv[3];
+        char node_path[PATH_MAX];
+        if (find_node_path_in_config(node_name, node_path, sizeof(node_path)) != 0) return 1;
+
+        if (strcmp(sub_name, "master") == 0) {
+            fprintf(stderr, "Error: Cannot remove the 'master' (Trunk) subsection.\n");
+            return 1;
+        }
+
+        char current_subsec_name[MAX_NODE_NAME_LEN];
+        get_current_subsection(node_path, current_subsec_name, sizeof(current_subsec_name));
+        if (strcmp(sub_name, current_subsec_name) == 0) {
+            fprintf(stderr, "Error: Cannot remove currently active subsection.\n");
+            fprintf(stderr, "Switch to another subsection first (e.g., 'exodus switch %s master').\n", node_name);
+            return 1;
+        }
+
+        char subsec_file_path[PATH_MAX];
+        snprintf(subsec_file_path, sizeof(subsec_file_path), "%s/.log/subsections/%s.subsec", node_path, sub_name);
+
+        if (access(subsec_file_path, F_OK) != 0) {
+            fprintf(stderr, "Error: Subsection '%s' does not exist.\n", sub_name);
+            return 1;
+        }
+        
+        if (remove(subsec_file_path) == 0) {
+            printf("Subsection '%s' file removed. Its object history is now orphaned.\n", sub_name);
+        } else {
+            perror("Error: Failed to remove subsection file");
+        }
+
+    } else if (strcmp(argv[1], "switch") == 0) {
+        if (argc != 4) {
+            fprintf(stderr, "Usage: exodus switch <node_name> <subsection_name>\n");fprintf(stderr, "  %-12s Show the commit history for the active subsection\n", "log");
+            return 1;
+        }
+        char* node_name = argv[2];
+        char* new_sub_name = argv[3];
+        char node_path[PATH_MAX];
+        if (find_node_path_in_config(node_name, node_path, sizeof(node_path)) != 0) return 1;
+
+        // 1. Check if subsection exists (unless it's "master")
+        if (strcmp(new_sub_name, "master") != 0) {
+            char subsec_file_path[PATH_MAX];
+            snprintf(subsec_file_path, sizeof(subsec_file_path), "%s/.log/subsections/%s.subsec", node_path, new_sub_name);
+            if (access(subsec_file_path, F_OK) != 0) {
+                fprintf(stderr, "Error: Subsection '%s' does not exist.\n", new_sub_name);
+                fprintf(stderr, "Use 'exodus add-subs %s %s' to create it.\n", node_name, new_sub_name);
+                return 1;
+            }
+        }
+        
+        // 2. Get current subsection to check if we're already on it
+        char current_subsec_name[MAX_NODE_NAME_LEN];
+        get_current_subsection(node_path, current_subsec_name, sizeof(current_subsec_name));
+        if (strcmp(new_sub_name, current_subsec_name) == 0) {
+            printf("Already on subsection '%s'.\n", new_sub_name);
+            return 0;
+        }
+
+        // 3. Check for uncommitted changes
+        char history_path[PATH_MAX];
+        snprintf(history_path, sizeof(history_path), "%s/.log/history.json", node_path);
+        struct stat st_hist = {0};
+        if (stat(history_path, &st_hist) == 0 && st_hist.st_size > 5) {
+            fprintf(stderr, "Error: Cannot switch subsection with uncommitted changes.\n");
+            fprintf(stderr, "Please run 'exodus commit' or 'exodus node-status' to review changes.\n");
+            return 1;
+        }
+
+        // 4. Write the new current subsection
+        char subsec_file_path[PATH_MAX];
+        snprintf(subsec_file_path, sizeof(subsec_file_path), "%s/.log/CURRENT_SUBSECTION", node_path);
+        FILE* f = fopen(subsec_file_path, "w");
+        if (!f) {
+            perror("Error: Could not write to CURRENT_SUBSECTION file");
+            return 1;
+        }
+        fprintf(f, "%s\n", new_sub_name);
+        fclose(f);
+
+        // 5. Trigger a "rebuild" to the new subsection's HEAD
+        printf("Switched to subsection '%s'.\n", new_sub_name);
+        printf("Rebuilding working directory to match subsection HEAD...\n");
+        
+        int result = cortez_ipc_send("./exodus_snapshot",
+                                     CORTEZ_TYPE_STRING, "rebuild",
+                                     CORTEZ_TYPE_STRING, node_name,
+                                     CORTEZ_TYPE_STRING, node_path,
+                                     CORTEZ_TYPE_STRING, new_sub_name, // Pass the new subsection
+                                     CORTEZ_TYPE_STRING, "LATEST_HEAD", // Special tag
+                                     0);
+        if (result == 0) {
+            printf("Rebuild complete. Working directory now matches subsection '%s'.\n", new_sub_name);
+        } else {
+            fprintf(stderr, "Fatal: Failed to rebuild to new subsection HEAD.\n");
+        }
+
+    } else if (strcmp(argv[1], "promote") == 0) {
+        if (argc != 5) {
+            fprintf(stderr, "Usage: exodus promote <node_name> <subsection_name> <message>\n");
+            return 1;
+        }
+        char* node_name = argv[2];
+        char* sub_to_promote = argv[3];
+        char* message = argv[4];
+        char node_path[PATH_MAX];
+        if (find_node_path_in_config(node_name, node_path, sizeof(node_path)) != 0) return 1;
+
+        if (strcmp(sub_to_promote, "master") == 0) {
+            fprintf(stderr, "Error: Cannot promote 'master' onto itself.\n");
+            return 1;
+        }
+
+        // --- Safety Checks ---
+        char current_subsec_name[MAX_NODE_NAME_LEN];
+        get_current_subsection(node_path, current_subsec_name, sizeof(current_subsec_name));
+        
+        if (strcmp(sub_to_promote, current_subsec_name) == 0) {
+            fprintf(stderr, "Error: Cannot promote the subsection you are currently on.\n");
+            fprintf(stderr, "Please switch to 'master' first: exodus switch %s master\n", node_name);
+            return 1;
+        }
+        if (strcmp("master", current_subsec_name) != 0) {
+             fprintf(stderr, "Warning: You are promoting *from* subsection '%s', not from 'master'.\n", current_subsec_name);
+             fprintf(stderr, "Promotions should typically be done *while on* the 'master' (Trunk) subsection.\n");
+             printf("Continue anyway? (y/N) ");
+             char confirm[10];
+             if (fgets(confirm, sizeof(confirm), stdin) == NULL || (confirm[0] != 'y' && confirm[0] != 'Y')) {
+                printf("Promotion cancelled.\n");
+                return 1;
+             }
+        }
+        
+        const char* delete_flag = "--keep"; 
+        printf("Delete subsection '%s' after successful promotion? (y/N) ", sub_to_promote);
+        char confirm_del[10];
+        if (fgets(confirm_del, sizeof(confirm_del), stdin) != NULL && (confirm_del[0] == 'y' || confirm_del[0] == 'Y')) {
+            delete_flag = "--delete";
+        }
+
+        printf("Sending 'promote' command for subsection '%s'...\n", sub_to_promote);
+        
+
+        int result = cortez_ipc_send("./exodus_snapshot",
+                                     CORTEZ_TYPE_STRING, "promote",
+                                     CORTEZ_TYPE_STRING, node_name,
+                                     CORTEZ_TYPE_STRING, node_path,
+                                     CORTEZ_TYPE_STRING, sub_to_promote, 
+                                     CORTEZ_TYPE_STRING, message,  
+                                     CORTEZ_TYPE_STRING, delete_flag, 
+                                     0);
+        if (result != 0) {
+             fprintf(stderr, "Failed to start promote process.\n");
+        } else {
+            printf("Promotion process complete. Check logs for details.\n");
+        }
+    
+    }else if (strcmp(argv[1], "log") == 0) {
+        if (argc != 3) {
+            fprintf(stderr, "Usage: exodus log <node_name>\n");
+            return 1;
+        }
+        char* node_name = argv[2];
+        char node_path[PATH_MAX];
+        if (find_node_path_in_config(node_name, node_path, sizeof(node_path)) != 0) return 1;
+
+        char subsection_name[MAX_NODE_NAME_LEN];
+        get_current_subsection(node_path, subsection_name, sizeof(subsection_name));
+
+        printf("Displaying commit log for subsection '%s':\n\n", subsection_name);
+
+        int result = cortez_ipc_send("./exodus_snapshot",
+                                     CORTEZ_TYPE_STRING, "log",
+                                     CORTEZ_TYPE_STRING, node_name,
+                                     CORTEZ_TYPE_STRING, node_path,
+                                     CORTEZ_TYPE_STRING, subsection_name,
+                                     0); // No other args needed
+        if (result != 0) {
+             fprintf(stderr, "Failed to start log process.\n");
+        }
+    } else if (strcmp(argv[1], "commit") == 0) {
+    if (argc != 4) {
+        fprintf(stderr, "Usage: exodus commit <node_name> <version_tag>\n");
+        return 1;
+    }
+    char node_path[PATH_MAX];
+    if (find_node_path_in_config(argv[2], node_path, sizeof(node_path)) != 0) {
+        return 1; 
+    }
+
+    char subsection_name[MAX_NODE_NAME_LEN];
+    get_current_subsection(node_path, subsection_name, sizeof(subsection_name));
+    printf("Sending 'commit' for node '%s' (subsection '%s') with tag '%s'...\n", argv[2], subsection_name, argv[3]);
+
+
+
+    int result = cortez_ipc_send("./exodus_snapshot",
+                                 CORTEZ_TYPE_STRING, "commit",
+                                 CORTEZ_TYPE_STRING, argv[2],     // node_name
+                                 CORTEZ_TYPE_STRING, node_path,   // node_path
+                                 CORTEZ_TYPE_STRING, subsection_name, // NEW ARG
+                                 CORTEZ_TYPE_STRING, argv[3],     // version_tag
+                                 0); 
+
+
+    if (result == 0) {
+        printf("Snapshot process complete. Check logs for details.\n");
+
+        if (strcmp(subsection_name, "master") == 0) {
             printf("Updating node's current version to '%s'...\n", argv[3]);
             if (update_node_current_version(argv[2], argv[3]) != 0) {
                 fprintf(stderr, "Warning: Snapshot was created, but failed to update 'current_version' in nodewatch.json.\n");
             }
-
         } else {
-            fprintf(stderr, "Failed to start snapshot process. Is 'exodus_snapshot' in the same directory?\n");
+            printf("Commit created on subsection '%s'. 'current_version' in nodewatch.json not updated.\n", subsection_name);
         }
+
+
+    } else {
+        fprintf(stderr, "Failed to start snapshot process. Is 'exodus_snapshot' in the same directory?\n");
+    }
     } else if (strcmp(argv[1], "rebuild") == 0) {
         if (argc != 4) {
             fprintf(stderr, "Usage: exodus rebuild <node_name> <version_tag>\n");
@@ -1862,7 +2561,12 @@ int main(int argc, char* argv[]) {
         if (find_node_path_in_config(argv[2], node_path, sizeof(node_path)) != 0) {
             return 1;
         }
+
+        char subsection_name[MAX_NODE_NAME_LEN];
+        get_current_subsection(node_path, subsection_name, sizeof(subsection_name));
+        printf("Sending 'rebuild' for node '%s' (subsection '%s') to version '%s'...\n", argv[2], subsection_name, argv[3]);
         printf("Sending 'rebuild' command for node '%s' to version '%s'...\n", argv[2], argv[3]);
+
         printf("WARNING: This will delete all current data in the node. Continue? (y/N) ");
         char confirm[10];
         if (fgets(confirm, sizeof(confirm), stdin) == NULL || (confirm[0] != 'y' && confirm[0] != 'Y')) {
@@ -1871,16 +2575,71 @@ int main(int argc, char* argv[]) {
         }
         
         int result = cortez_ipc_send("./exodus_snapshot",
-                                     CORTEZ_TYPE_STRING, "rebuild",
-                                     CORTEZ_TYPE_STRING, argv[2],
-                                     CORTEZ_TYPE_STRING, node_path,
-                                     CORTEZ_TYPE_STRING, argv[3],
-                                     0); // 0 terminates the argument list
+                                 CORTEZ_TYPE_STRING, "rebuild",
+                                 CORTEZ_TYPE_STRING, argv[2],
+                                 CORTEZ_TYPE_STRING, node_path,
+                                 CORTEZ_TYPE_STRING, subsection_name, // NEW ARG
+                                 CORTEZ_TYPE_STRING, argv[3],
+                                 0);// 0 terminates the argument list
         if (result == 0) {
             printf("Rebuild process complete. Check logs for details.\n");
         } else {
             fprintf(stderr, "Failed to start rebuild process. Is 'exodus_snapshot' in the same directory?\n");
         }
+    }else if (strcmp(argv[1], "diff") == 0) {
+    if (argc != 5) {
+        fprintf(stderr, "Usage: exodus diff <node_name> <version_tag_1> <version_tag_2>\n");
+        return 1;
+    }
+    char node_path[PATH_MAX];
+    if (find_node_path_in_config(argv[2], node_path, sizeof(node_path)) != 0) {
+        return 1;
+    }
+
+    char subsection_name[MAX_NODE_NAME_LEN];
+    get_current_subsection(node_path, subsection_name, sizeof(subsection_name));
+    printf("Generating diff for node '%s' (subsection '%s') between '%s' and '%s'...\n", argv[2], subsection_name, argv[3], argv[4]);
+    printf("Generating diff for node '%s' between '%s' and '%s'...\n", argv[2], argv[3], argv[4]);
+    int result = cortez_ipc_send("./exodus_snapshot",
+                                 CORTEZ_TYPE_STRING, "diff",
+                                 CORTEZ_TYPE_STRING, argv[2],
+                                 CORTEZ_TYPE_STRING, node_path,
+                                 CORTEZ_TYPE_STRING, subsection_name, // NEW ARG
+                                 CORTEZ_TYPE_STRING, argv[3], // v1
+                                 CORTEZ_TYPE_STRING, argv[4], // v2
+                                 0);
+    if (result != 0) {
+        fprintf(stderr, "Failed to start diff process. Is 'exodus_snapshot' in the same directory?\n");
+    }
+
+    }else if (strcmp(argv[1], "checkout") == 0) {
+    if (argc != 5) {
+        fprintf(stderr, "Usage: exodus checkout <node_name> <version_tag> <file/path/to/restore>\n");
+        return 1;
+    }
+    char node_path[PATH_MAX];
+    if (find_node_path_in_config(argv[2], node_path, sizeof(node_path)) != 0) {
+        return 1;
+    }
+
+    char subsection_name[MAX_NODE_NAME_LEN];
+    get_current_subsection(node_path, subsection_name, sizeof(subsection_name));
+    printf("Restoring '%s' in node '%s' (subsection '%s') to version '%s'...\n", argv[4], argv[2], subsection_name, argv[3]);
+    printf("Restoring '%s' in node '%s' to version '%s'...\n", argv[4], argv[2], argv[3]);
+    int result = cortez_ipc_send("./exodus_snapshot",
+                                 CORTEZ_TYPE_STRING, "checkout",
+                                 CORTEZ_TYPE_STRING, argv[2],
+                                 CORTEZ_TYPE_STRING, node_path,
+                                 CORTEZ_TYPE_STRING, subsection_name, // NEW ARG
+                                 CORTEZ_TYPE_STRING, argv[3], // version
+                                 CORTEZ_TYPE_STRING, argv[4], // file_path
+                                 0);
+    if (result == 0) {
+        printf("File restore process complete. Check logs for details.\n");
+    } else {
+        fprintf(stderr, "Failed to start checkout process. Is 'exodus_snapshot' in the same directory?\n");
+    }
+
     } else if (strcmp(argv[1], "history") == 0) {
         if (argc < 3 || argc > 4) {
             fprintf(stderr, "Usage: exodus history <node name> [--V]\n");
@@ -1890,11 +2649,24 @@ int main(int argc, char* argv[]) {
         if (find_node_path_in_config(argv[2], node_path, sizeof(node_path)) != 0) {
             return 1;
         }
+        
+
+        char subsection_name[MAX_NODE_NAME_LEN];
+        get_current_subsection(node_path, subsection_name, sizeof(subsection_name));
+
+        
         char data_path[PATH_MAX];
         const char* title;
+        
         if (argc == 4 && strcmp(argv[3], "--V") == 0) {
-            snprintf(data_path, sizeof(data_path), "%s/.log/versions.json", node_path);
+
+            if (strcmp(subsection_name, "master") == 0) {
+                snprintf(data_path, sizeof(data_path), "%s/.log/TRUNK.versions.json", node_path);
+            } else {
+                snprintf(data_path, sizeof(data_path), "%s/.log/subsections/%s.versions.json", node_path, subsection_name);
+            }
             title = "Persistent Commit History (Versions)";
+
         } else if (argc == 3) {
             snprintf(data_path, sizeof(data_path), "%s/.log/history.json", node_path);
             title = "Recent Activity (Uncommitted Changes)";
@@ -1902,12 +2674,24 @@ int main(int argc, char* argv[]) {
              fprintf(stderr, "Usage: exodus history <node name> [--V]\n");
              return 1;
         }
+
         FILE* f = fopen(data_path, "r");
         if (!f) {
-            fprintf(stderr, "Error: Could not open data file at %s.\n", data_path);
+
+            if (argc == 4) {
+                 fprintf(stderr, "Error: Could not open data file. Does subsection '%s' have any commits?\n", subsection_name);
+                 fprintf(stderr, "Path: %s\n", data_path);
+            } else {
+                fprintf(stderr, "Error: Could not open data file at %s.\n", data_path);
+            }
+
             return 1;
         }
-        printf("--- %s for Node '%s' ---\n", title, argv[2]);
+        
+
+        printf("--- %s for Node '%s' (Subsection: '%s') ---\n", title, argv[2], subsection_name);
+
+        
         int c;
         while ((c = fgetc(f)) != EOF) {
             putchar(c);

@@ -63,6 +63,12 @@ enum exodus_msg_types {
     // Snapshot Daemon -> Cloud Daemon
     MSG_SNAPSHOT_PROGRESS = MESH_MSG_USER_START + 32,
 
+    //Node Management
+    MSG_NODE_MAN_CREATE = MESH_MSG_USER_START + 33,
+    MSG_NODE_MAN_DELETE = MESH_MSG_USER_START + 34,
+    MSG_NODE_MAN_MOVE = MESH_MSG_USER_START + 35,
+    MSG_NODE_MAN_COPY = MESH_MSG_USER_START + 36,
+
 
     // Exodus -> Daemons
     MSG_TERMINATE = MESH_MSG_USER_START + 99,
@@ -183,9 +189,28 @@ typedef struct {
 typedef struct {
     char version_tag[MAX_NODE_NAME_LEN];
     char status_message[128];
-    int is_final; // 1 if this is the last report (success or fail), 0 otherwise
+    int is_final; 
 } snapshot_progress_t;
 
+// For MSG_NODE_MAN_CREATE
+typedef struct {
+    char node_name[MAX_NODE_NAME_LEN];  
+    char path[MAX_PATH_LEN];            
+    int is_directory;                   
+} node_man_create_req_t;
 
+// For MSG_NODE_MAN_DELETE
+typedef struct {
+    char node_name[MAX_NODE_NAME_LEN];  
+    char path[MAX_PATH_LEN];            
+} node_man_delete_req_t;
+
+// For MSG_NODE_MAN_MOVE and MSG_NODE_MAN_COPY
+typedef struct {
+    char src_node[MAX_NODE_NAME_LEN];
+    char src_path[MAX_PATH_LEN];
+    char dest_node[MAX_NODE_NAME_LEN];
+    char dest_path[MAX_PATH_LEN];
+} node_man_move_copy_req_t;
 
 #endif // EXODUS_COMMON_H

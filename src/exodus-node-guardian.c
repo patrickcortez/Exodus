@@ -19,6 +19,7 @@
 #include <libgen.h>
 #include <time.h>
 #include <ctype.h>
+#include <sys/types.h>
 
 #include "ctz-json.h"
 #include "exodus-common.h"
@@ -54,6 +55,21 @@ typedef struct FilterEntry {
     struct FilterEntry* next;
 } FilterEntry;
 
+typedef struct DiffChange {
+    char op; 
+    int line_num;
+    const char* content;
+    struct DiffChange* next;
+    int matched;
+} DiffChange;
+
+typedef struct MovedChange {
+    int from_line;
+    int to_line;
+    const char* content;
+    struct MovedChange* next;
+} MovedChange;
+
 // --- Global Variables ---
 
 static volatile int g_keep_running = 1;
@@ -77,7 +93,115 @@ void int_handler(int dummy) {
     fprintf(stderr, "[Guardian] Received termination signal.\n");
 }
 
-// --- Helper Functions (Minimal versions from cloud-daemon) ---
+static uid_t get_uid_for_path(const char* path) {
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        return st.st_uid;
+    }
+    return (uid_t)-1; // Error
+}
+
+static void get_username_from_uid(uid_t uid, char* buf, size_t buf_size) {
+    // Default to a fallback name
+    snprintf(buf, buf_size, "%d", (int)uid);
+
+    FILE* f = fopen("/etc/passwd", "r");
+    if (!f) {
+        return; // Use the fallback name
+    }
+
+    char line[1024];
+    char* saveptr;
+    int found = 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = 0; // Remove newline
+        char* line_copy = strdup(line);
+        if (line_copy == NULL) continue;
+
+        // 1. name
+        char* name = strtok_r(line_copy, ":", &saveptr);
+        if (name == NULL) { free(line_copy); continue; }
+        
+        // 2. pass
+        char* pass = strtok_r(NULL, ":", &saveptr);
+        if (pass == NULL) { free(line_copy); continue; }
+        
+        // 3. uid
+        char* uid_str = strtok_r(NULL, ":", &saveptr);
+        if (uid_str == NULL) { free(line_copy); continue; }
+
+        if (atoi(uid_str) == (int)uid) {
+            strncpy(buf, name, buf_size - 1);
+            buf[buf_size - 1] = '\0';
+            found = 1;
+            free(line_copy);
+            break;
+        }
+        free(line_copy);
+    }
+    fclose(f);
+    
+    if (!found) {
+        // Fallback already set, just return
+        return;
+    }
+}
+
+static int split_lines(char* content_copy, char*** lines_array_out) {
+    if (!content_copy) {
+        *lines_array_out = NULL;
+        return 0;
+    }
+
+    int line_count = 0;
+    // 1. Count the lines
+    for (char* p = content_copy; *p; p++) {
+        if (*p == '\n') {
+            line_count++;
+        }
+    }
+    // Account for the last line if the file doesn't end with \n
+    if (content_copy[0] != '\0' && (line_count == 0 || content_copy[strlen(content_copy) - 1] != '\n')) {
+         line_count++;
+    }
+
+    if (line_count == 0) {
+        *lines_array_out = NULL;
+        return 0;
+    }
+
+    // 2. Allocate the array
+    *lines_array_out = malloc(line_count * sizeof(char*));
+    if (!*lines_array_out) return 0;
+
+    int current_line = 0;
+    char* line_start = content_copy;
+    
+    // Always add the first line
+    (*lines_array_out)[current_line++] = line_start;
+
+    // Iterate and manually split the string
+    for (char* p = content_copy; *p; p++) {
+        if (*p == '\n') {
+            *p = '\0'; // Terminate the current line string
+
+            if (current_line < line_count) {
+                (*lines_array_out)[current_line++] = p + 1;
+            }
+        }
+    }
+    
+    return current_line;
+}
+
+static void free_lcs_matrix(int** matrix, int rows) {
+    if (!matrix) return;
+    for (int i = 0; i < rows; i++) {
+        free(matrix[i]);
+    }
+    free(matrix);
+}
 
 static int check_and_update_debounce(const char* full_path) {
     const int DEBOUNCE_SECONDS = 2;
@@ -243,7 +367,7 @@ void update_file_cache(const char* path, const char* content) {
     pthread_mutex_unlock(&g_file_cache_mutex);
 }
 
-void add_event_to_history(EventType type, const char* name, const char* details_json_obj) {
+void add_event_to_history(EventType type, const char* name, const char* user, const char* details_json_obj){
     
     // 1. Load the existing history file
     ctz_json_value* history_array = ctz_json_load_file(g_history_file_path, NULL, 0);
@@ -258,6 +382,7 @@ void add_event_to_history(EventType type, const char* name, const char* details_
     
     ctz_json_object_set_value(event_obj, "event", ctz_json_new_string(type_str));
     ctz_json_object_set_value(event_obj, "name", ctz_json_new_string(name));
+    ctz_json_object_set_value(event_obj, "user", ctz_json_new_string(user ? user : "unknown"));
 
     
     if (g_time_format == TIME_REAL) {
@@ -331,7 +456,7 @@ void add_event_to_history(EventType type, const char* name, const char* details_
     ctz_json_free(history_array);
 }
 
-void handle_file_modification(const char* full_path) {
+void handle_file_modification(const char* full_path, const char* user) {
 
     // Use the existing guardian debounce function
     if (!check_and_update_debounce(full_path)) {
@@ -343,7 +468,7 @@ void handle_file_modification(const char* full_path) {
 
     char* old_content = NULL;
     
-    // Find the previous content in our cache
+    // Find the previous content in our cache (using guardian's global cache)
     pthread_mutex_lock(&g_file_cache_mutex);
     for (FileCache* current = g_file_cache_head; current; current = current->next) {
         if (strcmp(current->path, full_path) == 0) {
@@ -358,43 +483,152 @@ void handle_file_modification(const char* full_path) {
     
     // If we have no previous state, we can't diff. Log a simple modification.
     if (!old_content) {
-        add_event_to_history(EV_MODIFIED, relative_path, NULL);
+        add_event_to_history(EV_MODIFIED, relative_path, user, NULL); // Use guardian's log function
         update_file_cache(full_path, new_content);
         free(new_content);
         return;
     }
     
-    // --- Naive Line-Based Diff Implementation ---
+    
     ctz_json_value* changes_obj = ctz_json_new_object();
     ctz_json_value* added_array = ctz_json_new_array();
     ctz_json_value* removed_array = ctz_json_new_array();
+    ctz_json_value* moved_array = ctz_json_new_array();
 
     char* old_copy = strdup(old_content);
     char* new_copy = strdup(new_content);
     
-    // Find lines in old_content that are not in new_content
-    char* saveptr1;
-    char* old_line = strtok_r(old_copy, "\n", &saveptr1);
-    while(old_line) {
-        if (strstr(new_content, old_line) == NULL) {
-            ctz_json_array_push_value(removed_array, ctz_json_new_string(old_line));
-        }
-        old_line = strtok_r(NULL, "\n", &saveptr1);
+    char** old_lines = NULL;
+    char** new_lines = NULL;
+
+    int old_count = split_lines(old_copy, &old_lines);
+    int new_count = split_lines(new_copy, &new_lines);
+
+    // 1. Allocate and fill the LCS dynamic programming matrix
+    int** lcs_matrix = malloc((old_count + 1) * sizeof(int*));
+    if (!lcs_matrix) { /* handle malloc failure */ }
+    
+    for (int i = 0; i <= old_count; i++) {
+        lcs_matrix[i] = calloc((new_count + 1), sizeof(int));
+        if (!lcs_matrix[i]) { /* handle malloc failure */ }
     }
 
-    // Find lines in new_content that are not in old_content
-    char* saveptr2;
-    char* new_line = strtok_r(new_copy, "\n", &saveptr2);
-    while(new_line) {
-        if (strstr(old_content, new_line) == NULL) {
-             ctz_json_array_push_value(added_array, ctz_json_new_string(new_line));
+    for (int i = 1; i <= old_count; i++) {
+        for (int j = 1; j <= new_count; j++) {
+            if (strcmp(old_lines[i - 1], new_lines[j - 1]) == 0) {
+                lcs_matrix[i][j] = lcs_matrix[i - 1][j - 1] + 1;
+            } else {
+                int above = lcs_matrix[i - 1][j];
+                int left = lcs_matrix[i][j - 1];
+                lcs_matrix[i][j] = (above > left) ? above : left;
+            }
         }
-        new_line = strtok_r(NULL, "\n", &saveptr2);
     }
+
+    // 2. Backtrack through the matrix to build the diff lists
+    DiffChange* added_list_head = NULL;
+    DiffChange* removed_list_head = NULL;
+    int i = old_count;
+    int j = new_count;
+    while (i > 0 || j > 0) {
+        if (i > 0 && j > 0 && strcmp(old_lines[i - 1], new_lines[j - 1]) == 0) {
+            i--;
+            j--;
+        } else if (j > 0 && (i == 0 || lcs_matrix[i][j - 1] >= lcs_matrix[i - 1][j])) {
+            // Added line (from new)
+            DiffChange* change = malloc(sizeof(DiffChange));
+            change->op = 'a';
+            change->line_num = j;
+            change->content = new_lines[j - 1];
+            change->matched = 0;
+            change->next = added_list_head;
+            added_list_head = change;
+            j--;
+        } else if (i > 0 && (j == 0 || lcs_matrix[i][j - 1] < lcs_matrix[i - 1][j])) {
+            // Removed line (from old)
+            DiffChange* change = malloc(sizeof(DiffChange));
+            change->op = 'd';
+            change->line_num = i;
+            change->content = old_lines[i - 1];
+            change->matched = 0;
+            change->next = removed_list_head;
+            removed_list_head = change;
+            i--;
+        }
+    }
+
+    // 2.5. Detect Moved Lines (Post-processing)
+    MovedChange* moved_list_head = NULL;
+    for (DiffChange* r_node = removed_list_head; r_node; r_node = r_node->next) {
+        if (r_node->matched) continue;
+        for (DiffChange* a_node = added_list_head; a_node; a_node = a_node->next) {
+            if (a_node->matched) continue;
+            if (strcmp(r_node->content, a_node->content) == 0) {
+                // We found a move!
+                MovedChange* move = malloc(sizeof(MovedChange));
+                move->from_line = r_node->line_num;
+                move->to_line = a_node->line_num;
+                move->content = r_node->content;
+                move->next = moved_list_head;
+                moved_list_head = move;
+                r_node->matched = 1;
+                a_node->matched = 1;
+                break;
+            }
+        }
+    }
+
+    // 3. Convert the diff linked lists into the final JSON arrays
+    MovedChange* current_move = moved_list_head;
+    while (current_move) {
+        ctz_json_value* change_obj = ctz_json_new_object();
+        ctz_json_object_set_value(change_obj, "from", ctz_json_new_number(current_move->from_line));
+        ctz_json_object_set_value(change_obj, "to", ctz_json_new_number(current_move->to_line));
+        ctz_json_object_set_value(change_obj, "content", ctz_json_new_string(current_move->content));
+        ctz_json_array_push_value(moved_array, change_obj);
+        MovedChange* next = current_move->next;
+        free(current_move);
+        current_move = next;
+    }
+
+    DiffChange* current_change = added_list_head;
+    while (current_change) {
+        if (!current_change->matched) {
+            ctz_json_value* change_obj = ctz_json_new_object();
+            ctz_json_object_set_value(change_obj, "line", ctz_json_new_number(current_change->line_num));
+            ctz_json_object_set_value(change_obj, "content", ctz_json_new_string(current_change->content));
+            ctz_json_array_push_value(added_array, change_obj);
+        }
+        DiffChange* next = current_change->next;
+        free(current_change);
+        current_change = next;
+    }
+
+    current_change = removed_list_head;
+    while (current_change) {
+        if (!current_change->matched) {
+            ctz_json_value* change_obj = ctz_json_new_object();
+            ctz_json_object_set_value(change_obj, "line", ctz_json_new_number(current_change->line_num));
+            ctz_json_object_set_value(change_obj, "content", ctz_json_new_string(current_change->content));
+            ctz_json_array_push_value(removed_array, change_obj);
+        }
+        DiffChange* next = current_change->next;
+        free(current_change);
+        current_change = next;
+    }
+
+    // 4. Clean up all allocations
+    free_lcs_matrix(lcs_matrix, old_count + 1);
+    free(old_lines);
+    free(new_lines);
     free(old_copy);
     free(new_copy);
 
     char* details_json_string = NULL;
+    
+    if (ctz_json_get_array_size(moved_array) > 0) ctz_json_object_set_value(changes_obj, "moved", moved_array);
+    else ctz_json_free(moved_array);
+
     if (ctz_json_get_array_size(added_array) > 0) ctz_json_object_set_value(changes_obj, "added", added_array);
     else ctz_json_free(added_array);
     
@@ -406,7 +640,7 @@ void handle_file_modification(const char* full_path) {
     }
     
     // Use the guardian's add_event_to_history function
-    add_event_to_history(EV_MODIFIED, relative_path, details_json_string);
+    add_event_to_history(EV_MODIFIED, relative_path, user, details_json_string);
     
     // Cleanup
     if (details_json_string) free(details_json_string);
@@ -521,16 +755,30 @@ void* watcher_thread_func(void* arg) {
 
                 const char* relative_path = event_full_path + strlen(g_node_path) + 1;
 
+                uid_t event_uid = (uid_t)-1;
+                if (event->mask & (IN_CREATE | IN_MOVED_TO | IN_MODIFY)) {
+                    // File exists, stat it
+                    event_uid = get_uid_for_path(event_full_path);
+                } else if (event->mask & (IN_DELETE | IN_MOVED_FROM)) {
+                    // File is gone, stat the parent directory
+                    event_uid = get_uid_for_path(map_entry->path);
+                }
+
+                char event_user[64] = "unknown";
+                if (event_uid != (uid_t)-1) {
+                    get_username_from_uid(event_uid, event_user, sizeof(event_user));
+                }
+
                 if (event->mask & IN_ISDIR) {
                    
                     if (event->mask & (IN_CREATE | IN_MOVED_TO)) {
                         if (check_and_update_debounce(event_full_path)) { 
-                            add_event_to_history(EV_CREATED, relative_path, NULL);
+                            add_event_to_history(EV_CREATED, relative_path, event_user, NULL);
                             add_watches_recursively(event_full_path);
                         }
                     } else if (event->mask & (IN_DELETE | IN_MOVED_FROM)) {
                         if (check_and_update_debounce(event_full_path)) { 
-                            add_event_to_history(EV_DELETED, relative_path, NULL);
+                            add_event_to_history(EV_DELETED, relative_path, event_user, NULL);
                         }
                     }
                     
@@ -542,7 +790,7 @@ void* watcher_thread_func(void* arg) {
                                 // File is filtered. Delete it and log as "Deleted".
                                 unlink(event_full_path);
                                 // Log a special "Deleted (Filtered)" event
-                                add_event_to_history(EV_DELETED, relative_path, "{\"reason\":\"Filtered\"}");
+                                add_event_to_history(EV_DELETED, relative_path, event_user, "{\"reason\":\"Filtered\"}");
                                 update_file_cache(event_full_path, NULL); // Remove from cache
                             }
                             
@@ -554,7 +802,7 @@ void* watcher_thread_func(void* arg) {
 
                     if (event->mask & (IN_CREATE | IN_MOVED_TO)) {
                         if (check_and_update_debounce(event_full_path)) { 
-                            add_event_to_history(EV_CREATED, relative_path, NULL);
+                            add_event_to_history(EV_CREATED, relative_path, event_user, NULL);
                             char* content = read_file_content(event_full_path);
                             if (content) {
                                 update_file_cache(event_full_path, content);
@@ -564,13 +812,13 @@ void* watcher_thread_func(void* arg) {
                     }
                     if (event->mask & (IN_DELETE | IN_MOVED_FROM)) {
                         if (check_and_update_debounce(event_full_path)) { 
-                            add_event_to_history(EV_DELETED, relative_path, NULL);
+                            add_event_to_history(EV_DELETED, relative_path, event_user, NULL);
                             update_file_cache(event_full_path, NULL);
                         }
                     }
                     
                     if (event->mask & IN_MODIFY) {
-                        handle_file_modification(event_full_path);
+                        handle_file_modification(event_full_path, event_user);
                     }
                 }
             }
@@ -663,7 +911,7 @@ int main() {
     fprintf(stderr, "[Guardian] Cleaning up resources...\n");
     free_file_cache();
     free_wd_map();
-    free_filter_list(); // --- NEW: Cleanup filters ---
+    free_filter_list();
 
     pthread_mutex_destroy(&g_wd_map_mutex);
     pthread_mutex_destroy(&g_file_cache_mutex);

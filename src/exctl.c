@@ -127,8 +127,7 @@ static int get_home_from_uid(uid_t uid, char* home_buf, size_t home_size) {
     return found ? 0 : -1;
 }
 
-// --- NEW Helper: get_user_uid_from_path ---
-// Gets the owner UID of the node path itself
+
 static int get_user_uid_from_path(const char* path, uid_t* user_id) {
     struct stat st;
     if (stat(path, &st) != 0) {
@@ -139,8 +138,7 @@ static int get_user_uid_from_path(const char* path, uid_t* user_id) {
     return 0;
 }
 
-// --- REPLACED Helper: get_desktop_file_path ---
-// Now uses the node's path to find the correct user's home
+
 static int get_desktop_file_path(const char* node_name, const char* node_path, char* buf, size_t size) {
     uid_t uid;
     if (get_user_uid_from_path(node_path, &uid) != 0) {
@@ -518,6 +516,79 @@ void run_stop_cmd(int argc, char* argv[]) {
     print_status_for_node(node_name, node_path);
 }
 
+void run_restart_cmd(int argc, char* argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "Usage: exctl restart <node-name>\n");
+        return;
+    }
+    const char* node_name = argv[2];
+    char config_path[PATH_MAX];
+    if (get_config_path(config_path, sizeof(config_path)) != 0) return;
+
+    const char* node_path = get_node_path_from_config(node_name, config_path);
+    if (!node_path) {
+        // Error is printed by get_node_path_from_config
+        return;
+    }
+
+    char guardian_exec_path[PATH_MAX];
+    get_guardian_path(node_path, node_name, guardian_exec_path, sizeof(guardian_exec_path));
+
+    // --- 1. STOP LOGIC (from run_stop_cmd) ---
+    if (find_guardian_pid(guardian_exec_path) > 0) {
+        printf("Stopping guardian for '%s'...\n", node_name);
+        
+        char* path_copy = strdup(guardian_exec_path);
+        if (!path_copy) return;
+        char* exec_name = basename(path_copy);
+        
+        char cmd[PATH_MAX + 64];
+        snprintf(cmd, sizeof(cmd), "pkill -x \"%s\"", exec_name);
+        free(path_copy);
+
+        if (system(cmd) == 0) {
+            printf("Sent stop signal.\n");
+        } else {
+            printf("Guardian for '%s' was running but 'pkill' failed. It may have stopped.\n", node_name);
+        }
+        sleep(1); // Give it a second to die
+    } else {
+        printf("Guardian for '%s' is already stopped.\a\n", node_name);
+    }
+
+    // --- 2. START LOGIC (from run_start_cmd) ---
+    if (access(guardian_exec_path, X_OK) != 0) {
+        fprintf(stderr, "Error: Guardian executable not found or not executable:\n%s\n", guardian_exec_path);
+        fprintf(stderr, "Run 'exodus node-conf %s --auto 1' to create it.\n", node_name);
+        return;
+    }
+    
+    printf("Starting guardian for '%s'...\n", node_name);
+    pid_t pid = fork();
+    if (pid == 0) { // Child process
+        if (setsid() < 0) exit(1); // Detach from terminal
+        close(STDIN_FILENO); close(STDOUT_FILENO); close(STDERR_FILENO); // Close std fds
+        
+        // Drop privileges to the node's owner
+        uid_t uid;
+        if (get_user_uid_from_path(node_path, &uid) == 0) { //
+            if (setuid(uid) != 0) {
+                 exit(1); // Fail if we can't drop privileges
+            }
+        }
+        
+        execl(guardian_exec_path, guardian_exec_path, (char*)NULL);
+        exit(1); // Exit if execl fails
+    } else if (pid < 0) {
+        perror("fork failed");
+    } else {
+        // Parent process
+        printf("Restart command sent. Waiting for process to start...\n");
+        sleep(1); // Give it a second to boot
+        print_status_for_node(node_name, node_path); // Show final status
+    }
+}
+
 // --- Main ---
 void print_usage() {
     fprintf(stderr, "Usage: exctl <command> [args...]\n\n");
@@ -526,6 +597,7 @@ void print_usage() {
     fprintf(stderr, "  status -a             Check the status of all 'auto' guardians.\n");
     fprintf(stderr, "  start <node-name>     Manually start a guardian process.\n");
     fprintf(stderr, "  stop <node-name>      Manually stop a guardian process.\n");
+    fprintf(stderr, "  restart <node-name>   Stop and then start a guardian process.\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -536,6 +608,7 @@ int main(int argc, char* argv[]) {
     if (strcmp(argv[1], "status") == 0) run_status_cmd(argc, argv);
     else if (strcmp(argv[1], "start") == 0) run_start_cmd(argc, argv);
     else if (strcmp(argv[1], "stop") == 0) run_stop_cmd(argc, argv);
+    else if (strcmp(argv[1], "restart") == 0) run_restart_cmd(argc, argv);
     else {
         print_usage();
         return 1;

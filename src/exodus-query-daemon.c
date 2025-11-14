@@ -112,7 +112,8 @@ int main() {
         uint16_t msg_type = cortez_msg_type(msg);
 
         // --- Handle requests from clients (e.g., 'exodus' CLI) ---
-        if (msg_type >= MSG_UPLOAD_FILE && msg_type <= MSG_UNPIN_ITEM) {
+        if ((msg_type >= MSG_UPLOAD_FILE && msg_type <= MSG_COMMIT_NODE) || 
+            (msg_type >= MSG_NODE_MAN_CREATE && msg_type <= MSG_NODE_MAN_COPY)) {
             printf("[Query] Received request (type %d) from client %d. Forwarding to cloud daemon.\n", msg_type, sender_pid);
 
             PendingRequest* new_req = malloc(sizeof(PendingRequest));

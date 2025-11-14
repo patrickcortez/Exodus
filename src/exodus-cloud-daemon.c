@@ -2,6 +2,7 @@
  * Compile Command:
  * gcc -Wall -Wextra -O2 exodus-cloud-daemon.c cortez-mesh.o ctz-json.a -o cloud_daemon -pthread
  */
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,10 @@
 #include <dirent.h>
 #include <time.h> 
 #include <ctype.h>
+#include <ftw.h>
+#include <fcntl.h>
+#include <stdint.h>  
+#include <sys/uio.h>
 
 #include "cortez-mesh.h"
 #include "exodus-common.h"
@@ -115,6 +120,7 @@ typedef struct PendingMove {
     char from_path[PATH_MAX];
     WatchedNode* from_node;
     time_t timestamp;
+    char user[64];
     struct PendingMove* next;
 } PendingMove;
 
@@ -147,10 +153,146 @@ void* watcher_thread_func(void* arg);
 void recursive_scan_dir(const char* base_path, ctz_json_value* json_array);
 void add_watches_recursively(WatchedNode* node, const char* base_path);
 void remove_all_watches_for_node(WatchedNode* node);
-void handle_file_modification(WatchedNode* node, const char* full_path);
-void add_event_to_node(WatchedNode* node, EventType type, const char* name, const char* details_json_obj);
+void handle_file_modification(WatchedNode* node, const char* full_path, const char* user);
+void add_event_to_node(WatchedNode* node, EventType type, const char* name, const char* user, const char* details_json_obj);
 char* read_file_content(const char* path);
 void update_file_cache(const char* path, const char* content);
+int recursive_delete(const char* path); 
+int copy_file(const char* src, const char* dest); 
+int recursive_copy(const char* src, const char* dest);
+
+static ssize_t robust_read(int fd, void *buf, size_t count) {
+    size_t done = 0;
+    while (done < count) {
+        ssize_t r = read(fd, (char*)buf + done, count - done);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (r == 0) break;
+        done += r;
+    }
+    return (ssize_t)done;
+}
+
+static int secure_file_delete(const char *path) {
+    // Open file for read/write. Do NOT create if missing.
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        perror("[Cloud] secure_file_delete: open");
+        return -1;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        perror("[Cloud] secure_file_delete: fstat");
+        close(fd);
+        return -1;
+    }
+
+    // If it's not a regular file, refuse.
+    if (!S_ISREG(st.st_mode)) {
+        fprintf(stderr, "[Cloud] secure_file_delete: Not a regular file: %s\n", path);
+        close(fd);
+        return -1;
+    }
+
+    off_t orig_size = st.st_size;
+    if (orig_size == 0) {
+        // If empty file, just unlink and exit.
+        if (unlink(path) < 0) {
+            perror("[Cloud] secure_file_delete: unlink (empty file)");
+            close(fd);
+            return -1;
+        }
+        close(fd);
+        return 0;
+    }
+
+    // Remove the name so the file is gone from directory entries immediately.
+    if (unlink(path) < 0) {
+        perror("[Cloud] secure_file_delete: unlink");
+        close(fd);
+        return -1;
+    }
+
+    // Open /dev/urandom to get overwrite bytes
+    int rnd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (rnd < 0) {
+        perror("[Cloud] secure_file_delete: /dev/urandom");
+        fprintf(stderr, "[Cloud] Falling back to zero-fill (less secure)\n");
+    }
+
+    const size_t BUFSZ = 16*1024;
+    uint8_t *buf = malloc(BUFSZ);
+    if (!buf) {
+        fprintf(stderr, "[Cloud] secure_file_delete: malloc failed\n");
+        if (rnd >= 0) close(rnd);
+        close(fd);
+        return -1;
+    }
+
+    off_t remaining = orig_size;
+    off_t offset = 0;
+    while (remaining > 0) {
+        size_t to_write = (remaining > (off_t)BUFSZ) ? BUFSZ : (size_t)remaining;
+        
+        // Fill buffer from /dev/urandom if possible
+        if (rnd >= 0) {
+            ssize_t got = robust_read(rnd, buf, to_write);
+            if (got < 0 || (size_t)got != to_write) {
+                fprintf(stderr, "[Cloud] secure_file_delete: reading /dev/urandom failed; falling back to zeros\n");
+                memset(buf, 0, to_write);
+                // Don't close rnd, just use zeros from now on
+                close(rnd);
+                rnd = -1;
+            }
+        } else {
+            memset(buf, 0, to_write);
+        }
+
+        // Use pwrite to write at the current offset
+        ssize_t w = pwrite(fd, buf, to_write, offset);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            perror("[Cloud] secure_file_delete: pwrite");
+            free(buf);
+            if (rnd >= 0) close(rnd);
+            close(fd);
+            return -1;
+        }
+
+        offset += w;
+        remaining -= w;
+    }
+
+    // Ensure data is on stable storage.
+    if (fdatasync(fd) < 0) {
+        perror("[Cloud] secure_file_delete: fdatasync");
+    }
+    if (fsync(fd) < 0) {
+        perror("[Cloud] secure_file_delete: fsync");
+    }
+
+    // Optionally truncate to 0 bytes
+    if (ftruncate(fd, 0) < 0) {
+        perror("[Cloud] secure_file_delete: ftruncate");
+    } else {
+        if (fsync(fd) < 0) perror("[Cloud] secure_file_delete: fsync after ftruncate");
+    }
+
+    // cleanup
+    free(buf);
+    if (rnd >= 0) close(rnd);
+
+    // Closing the fd will allow kernel to free inode/blocks.
+    if (close(fd) < 0) {
+        perror("[Cloud] secure_file_delete: close");
+        return -1;
+    }
+
+    return 0; // Success
+}
 
 static int split_lines(char* content_copy, char*** lines_array_out) {
     if (!content_copy) {
@@ -196,9 +338,9 @@ static int split_lines(char* content_copy, char*** lines_array_out) {
         }
     }
     
-
     return current_line;
 }
+
 static void free_lcs_matrix(int** matrix, int rows) {
     if (!matrix) return;
     for (int i = 0; i < rows; i++) {
@@ -261,6 +403,57 @@ static int get_home_and_name_from_uid(uid_t uid, char* name_buf, size_t name_siz
     return found ? 0 : -1;
 }
 
+static int get_user_dbus_address(uid_t user_id, char* bus_addr_buf, size_t buf_size) {
+    char cmd[256];
+    // Find the 'systemd --user' process PID for the target user
+    snprintf(cmd, sizeof(cmd), "/usr/bin/pgrep -u %d -f \"systemd --user\" | /usr/bin/head -n 1", (int)user_id);
+    
+    FILE* pp = popen(cmd, "r");
+    if (!pp) return -1;
+    
+    char pid_str[32];
+    if (fgets(pid_str, sizeof(pid_str), pp) == NULL) {
+        pclose(pp);
+        return -1; // No process found
+    }
+    pclose(pp);
+    
+    pid_t pid = atoi(pid_str);
+    if (pid <= 1) return -1;
+
+    // Now read the environment of that process
+    char env_path[PATH_MAX];
+    snprintf(env_path, sizeof(env_path), "/proc/%d/environ", pid);
+    
+    int fd = open(env_path, O_RDONLY);
+    if (fd < 0) return -1;
+    
+    // 8KB buffer should be more than enough for environment strings
+    char buffer[8192]; 
+    ssize_t bytes_read = read(fd, buffer, sizeof(buffer) - 1);
+    close(fd);
+    
+    if (bytes_read <= 0) return -1;
+    buffer[bytes_read] = '\0'; // Ensure termination
+
+    // Iterate through the null-delimited strings
+    char* p = buffer;
+    char* end = buffer + bytes_read;
+    int found = 0;
+    
+    while (p < end) {
+        if (strncmp(p, "DBUS_SESSION_BUS_ADDRESS=", 25) == 0) {
+            strncpy(bus_addr_buf, p + 25, buf_size - 1);
+            bus_addr_buf[buf_size - 1] = '\0';
+            found = 1;
+            break;
+        }
+        p += strlen(p) + 1; // Move to the next string (past the null byte)
+    }
+    
+    return found ? 0 : -1;
+}
+
 static int get_user_from_path(const char* path, char* user_buf, size_t buf_size, uid_t* user_id) {
     struct stat st;
     if (stat(path, &st) != 0) {
@@ -280,6 +473,228 @@ static int get_user_from_path(const char* path, char* user_buf, size_t buf_size,
     return 0; // Success
 }
 
+static uid_t get_uid_for_path(const char* path) {
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        return st.st_uid;
+    }
+    return (uid_t)-1; // Error
+}
+
+static void get_username_from_uid(uid_t uid, char* buf, size_t buf_size) {
+    // Default to a fallback name
+    snprintf(buf, buf_size, "%d", (int)uid);
+
+    FILE* f = fopen("/etc/passwd", "r");
+    if (!f) {
+        return; // Use the fallback name
+    }
+
+    char line[1024];
+    char* saveptr;
+    int found = 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = 0; // Remove newline
+        char* line_copy = strdup(line);
+        if (line_copy == NULL) continue;
+
+        // 1. name
+        char* name = strtok_r(line_copy, ":", &saveptr);
+        if (name == NULL) { free(line_copy); continue; }
+        
+        // 2. pass
+        char* pass = strtok_r(NULL, ":", &saveptr);
+        if (pass == NULL) { free(line_copy); continue; }
+        
+        // 3. uid
+        char* uid_str = strtok_r(NULL, ":", &saveptr);
+        if (uid_str == NULL) { free(line_copy); continue; }
+
+        if (atoi(uid_str) == (int)uid) {
+            strncpy(buf, name, buf_size - 1);
+            buf[buf_size - 1] = '\0';
+            found = 1;
+            free(line_copy);
+            break;
+        }
+        free(line_copy);
+    }
+    fclose(f);
+    
+    if (!found) {
+        // Fallback already set, just return
+        return;
+    }
+}
+
+WatchedNode* find_node_by_name_locked(const char* name) {
+    pthread_mutex_lock(&node_list_mutex);
+    for (WatchedNode* n = watched_nodes_head; n; n = n->next) {
+        if (strcmp(n->name, name) == 0) {
+            // Found it
+            pthread_mutex_unlock(&node_list_mutex);
+            return n;
+        }
+    }
+    // Not found
+    pthread_mutex_unlock(&node_list_mutex);
+    return NULL;
+}
+
+int get_full_node_path(WatchedNode* node, const char* relative_path, char* full_path_buf, size_t buf_size) {
+    if (!node || !relative_path || !full_path_buf) return -1;
+
+    // 1. Basic check for '..'
+    if (strstr(relative_path, "..")) {
+        return -1; // Disallow ".." completely
+    }
+
+    // 2. Construct the path
+    snprintf(full_path_buf, buf_size, "%s/%s", node->path, relative_path);
+
+    // 3. Get real paths
+    char base_real_path[PATH_MAX];
+    char final_real_path[PATH_MAX];
+
+    if (realpath(node->path, base_real_path) == NULL) {
+        return -1; // Node base path is invalid
+    }
+
+    // realpath needs the path to exist for resolution, except for the last component.
+    // For our check, we can use a temporary buffer.
+    char temp_path[PATH_MAX];
+    strncpy(temp_path, full_path_buf, sizeof(temp_path) - 1);
+    
+    if (realpath(temp_path, final_real_path) == NULL) {
+        // Path doesn't exist yet (e.g., for 'create').
+        // Let's resolve the parent directory instead.
+        char* last_slash = strrchr(temp_path, '/');
+        if (last_slash) {
+            *last_slash = '\0';
+            if (realpath(temp_path, final_real_path) == NULL) {
+                 return -1; // Parent path is invalid
+            }
+        } else {
+            // No slash? Just use the base path.
+             realpath(node->path, final_real_path);
+        }
+    }
+
+    // 4. Check if the resolved path is still inside the base path
+    size_t base_len = strlen(base_real_path);
+    if (strncmp(base_real_path, final_real_path, base_len) != 0) {
+        return -1; // Path traversal detected!
+    }
+    
+    // Ensure it's not just a partial match (e.g., /base/foo vs /base/foobar)
+    if (final_real_path[base_len] != '\0' && final_real_path[base_len] != '/') {
+         return -1; // Traversal
+    }
+
+    return 0; // Success
+}
+
+int secure_recursive_delete_callback(const char* fpath, const struct stat* sb, int typeflag, struct FTW* ftwbuf) {
+    (void)sb; (void)ftwbuf;
+    int rv = -1;
+
+    switch (typeflag) {
+        case FTW_F:   // Regular File
+            rv = secure_file_delete(fpath); // <-- Use secure delete
+            break;
+            
+        case FTW_SL:  // Symlink
+        case FTW_SLN: // Broken symlink
+            rv = unlink(fpath); // <-- Symlinks are just unlinked
+            break;
+            
+        case FTW_DP:  // Directory (post-order)
+            rv = rmdir(fpath); // <-- Directories are just removed
+            break;
+            
+        case FTW_D:   // Directory (pre-order)
+            // Do nothing in pre-order
+            rv = 0;
+            break;
+            
+        default:
+            rv = -1; // Error
+            break;
+    }
+    
+    if (rv != 0) {
+        fprintf(stderr, "[Cloud] secure_recursive_delete_callback failed for: %s\n", fpath);
+    }
+    return rv;
+}
+
+int secure_recursive_delete(const char* path) {
+    return nftw(path, secure_recursive_delete_callback, 64, FTW_DEPTH | FTW_PHYS);
+}
+
+
+int copy_file(const char* src, const char* dest) {
+    int src_fd, dest_fd;
+    char buf[8192];
+    ssize_t n;
+    struct stat st;
+
+    if (stat(src, &st) != 0) return -1;
+    if ((src_fd = open(src, O_RDONLY)) == -1) return -1;
+    if ((dest_fd = open(dest, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode)) == -1) {
+        close(src_fd);
+        return -1;
+    }
+
+    while ((n = read(src_fd, buf, sizeof(buf))) > 0) {
+        if (write(dest_fd, buf, n) != n) {
+            close(src_fd);
+            close(dest_fd);
+            return -1;
+        }
+    }
+    
+    close(src_fd);
+    close(dest_fd);
+    return (n == 0) ? 0 : -1;
+}
+
+int recursive_copy(const char* src, const char* dest) {
+    DIR* dir;
+    struct dirent* entry;
+    struct stat st;
+
+    if (stat(src, &st) != 0) return -1;
+    if (mkdir(dest, st.st_mode) != 0) return -1;
+    if ((dir = opendir(src)) == NULL) return -1;
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+
+        char src_path[PATH_MAX];
+        char dest_path[PATH_MAX];
+        snprintf(src_path, sizeof(src_path), "%s/%s", src, entry->d_name);
+        snprintf(dest_path, sizeof(dest_path), "%s/%s", dest, entry->d_name);
+
+        if (stat(src_path, &st) != 0) continue;
+
+        if (S_ISDIR(st.st_mode)) {
+            if (recursive_copy(src_path, dest_path) != 0) {
+                closedir(dir);
+                return -1;
+            }
+        } else {
+            if (copy_file(src_path, dest_path) != 0) {
+                closedir(dir);
+                return -1;
+            }
+        }
+    }
+    
+    closedir(dir);
+    return 0;
+}
 
 static void get_real_time_string(char* buf, size_t size) {
     time_t now = time(NULL);
@@ -499,7 +914,7 @@ void remove_all_watches_for_node(WatchedNode* node) {
 }
 
 
-void handle_file_modification(WatchedNode* node, const char* full_path) {
+void handle_file_modification(WatchedNode* node, const char* full_path, const char* user) {
 
     const int DEBOUNCE_SECONDS = 2; // Cooldown window
     time_t now = time(NULL);
@@ -532,7 +947,7 @@ void handle_file_modification(WatchedNode* node, const char* full_path) {
 
     const char* relative_path = full_path + strlen(node->path) + 1;
     if (!old_content) {
-        add_event_to_node(node, EV_MODIFIED, relative_path, NULL);
+        add_event_to_node(node, EV_MODIFIED, relative_path, user, NULL);
         update_file_cache(full_path, new_content);
         free(new_content);
         return;
@@ -541,7 +956,7 @@ void handle_file_modification(WatchedNode* node, const char* full_path) {
     ctz_json_value* changes_obj = ctz_json_new_object();
     ctz_json_value* added_array = ctz_json_new_array();
     ctz_json_value* removed_array = ctz_json_new_array();
-    ctz_json_value* moved_array = ctz_json_new_array(); // --- NEW ---
+    ctz_json_value* moved_array = ctz_json_new_array();
 
     char* old_copy = strdup(old_content);
     char* new_copy = strdup(new_content);
@@ -703,7 +1118,7 @@ void handle_file_modification(WatchedNode* node, const char* full_path) {
         details_json_string = ctz_json_stringify(changes_obj, 0);
     }
     
-    add_event_to_node(node, EV_MODIFIED, relative_path, details_json_string);
+    add_event_to_node(node, EV_MODIFIED, relative_path, user, details_json_string);
     
     // Cleanup
     if (details_json_string) free(details_json_string);
@@ -962,7 +1377,7 @@ static void process_stale_moves_locked(time_t now) {
         // Check if the move event has expired
         if (now > entry->timestamp + MOVE_TIMEOUT_SECONDS) { 
             // Move expired, log it as a simple deletion from its source
-            add_event_to_node(entry->from_node, EV_DELETED, entry->from_path, NULL);
+            add_event_to_node(entry->from_node, EV_DELETED, entry->from_path, entry->user, NULL);
             
             // Unlink from the list and free
             *pptr = entry->next; 
@@ -1035,6 +1450,20 @@ void* watcher_thread_func(void* arg) {
                     
                     const char* relative_path = event_full_path + strlen(map_entry->parent_node->path) + 1;
 
+                    uid_t event_uid = (uid_t)-1;
+                    if (event->mask & (IN_CREATE | IN_MOVED_TO | IN_MODIFY)) {
+                        // File exists, stat it
+                        event_uid = get_uid_for_path(event_full_path);
+                    } else if (event->mask & (IN_DELETE | IN_MOVED_FROM)) {
+                        // File is gone, stat the parent directory
+                        event_uid = get_uid_for_path(map_entry->path);
+                    }
+
+                    char event_user[64] = "unknown";
+                    if (event_uid != (uid_t)-1) {
+                        get_username_from_uid(event_uid, event_user, sizeof(event_user));
+                    }
+
                     if (event->mask & IN_MOVED_FROM) {
                         PendingMove* new_move = malloc(sizeof(PendingMove));
                         if (new_move) {
@@ -1042,6 +1471,7 @@ void* watcher_thread_func(void* arg) {
                             strncpy(new_move->from_path, relative_path, sizeof(new_move->from_path) - 1);
                             new_move->from_node = map_entry->parent_node;
                             new_move->timestamp = now;
+                            strncpy(new_move->user, event_user, sizeof(new_move->user) - 1);
     
                             pthread_mutex_lock(&pending_move_mutex);
                             new_move->next = pending_move_head;
@@ -1071,7 +1501,7 @@ void* watcher_thread_func(void* arg) {
                                 char* details_str = ctz_json_stringify(details_obj, 0);
                                 
                                 // Log it as ONE event
-                                add_event_to_node(map_entry->parent_node, EV_MOVED, relative_path, details_str);
+                                add_event_to_node(map_entry->parent_node, EV_MOVED, relative_path, event_user, details_str);
                                 
                                 if (details_str) free(details_str);
                                 ctz_json_free(details_obj);
@@ -1104,7 +1534,7 @@ void* watcher_thread_func(void* arg) {
                         if (is_file_filtered(event->name, map_entry->parent_node->filter_list_head)) {
                                 // File is filtered. Delete it and log as "Deleted".
                                 unlink(event_full_path);
-                                add_event_to_node(map_entry->parent_node, EV_DELETED, relative_path, "{\"reason\":\"Filtered\"}");
+                                add_event_to_node(map_entry->parent_node, EV_DELETED, relative_path, event_user, "{\"reason\":\"Filtered\"}");
                                 update_file_cache(event_full_path, NULL); // Remove from cache
                                 
                                 // Skip all other processing for this event
@@ -1117,15 +1547,15 @@ void* watcher_thread_func(void* arg) {
                     if (event->mask & IN_ISDIR) {
                         // Event on a directory
                         if (event->mask & IN_CREATE) { // MOVED_TO is handled above
-                            add_event_to_node(map_entry->parent_node, EV_CREATED, relative_path, NULL);
+                            add_event_to_node(map_entry->parent_node, EV_CREATED, relative_path, event_user, NULL);
                             add_watches_recursively(map_entry->parent_node, event_full_path);
                         } else if (event->mask & IN_DELETE) { // MOVED_FROM is handled above
-                            add_event_to_node(map_entry->parent_node, EV_DELETED, relative_path, NULL);
+                            add_event_to_node(map_entry->parent_node, EV_DELETED, relative_path, event_user, NULL);
                         }
                     } else {
                         // Event on a file
                         if (event->mask & IN_CREATE) { // MOVED_TO is separate now
-                            add_event_to_node(map_entry->parent_node, EV_CREATED, relative_path, NULL);
+                            add_event_to_node(map_entry->parent_node, EV_CREATED, relative_path, event_user, NULL);
                             char* content = read_file_content(event_full_path);
                             if (content) {
                                 update_file_cache(event_full_path, content);
@@ -1133,11 +1563,11 @@ void* watcher_thread_func(void* arg) {
                             }
                         }
                         if (event->mask & IN_DELETE) { // MOVED_FROM is handled above
-                            add_event_to_node(map_entry->parent_node, EV_DELETED, relative_path, NULL);
+                            add_event_to_node(map_entry->parent_node, EV_DELETED, relative_path, event_user, NULL);
                             update_file_cache(event_full_path, NULL); // Remove from cache
                         }
                         if (event->mask & IN_MOVED_TO) { // Fall-through case (move *into* area)
-                            add_event_to_node(map_entry->parent_node, EV_CREATED, relative_path, NULL);
+                            add_event_to_node(map_entry->parent_node, EV_CREATED, relative_path, event_user, NULL);
                             char* content = read_file_content(event_full_path);
                             if (content) {
                                 update_file_cache(event_full_path, content);
@@ -1145,7 +1575,7 @@ void* watcher_thread_func(void* arg) {
                             }
                         }
                         if (event->mask & IN_MODIFY) {
-                            handle_file_modification(map_entry->parent_node, event_full_path);
+                            handle_file_modification(map_entry->parent_node, event_full_path, event_user);
                         }
                     }
                 }
@@ -1186,7 +1616,7 @@ void free_node_history(WatchedNode* node) {
     node->filter_list_head = NULL;
 }
 
-void add_event_to_node(WatchedNode* node, EventType type, const char* name, const char* details_json_obj) {
+void add_event_to_node(WatchedNode* node, EventType type, const char* name, const char* user, const char* details_json_obj) {
 
     NodeEvent* new_event = malloc(sizeof(NodeEvent));
     if (!new_event) return;
@@ -1227,6 +1657,7 @@ void add_event_to_node(WatchedNode* node, EventType type, const char* name, cons
                            (type == EV_MODIFIED ? "Modified" : "Moved"));
     ctz_json_object_set_value(event_obj, "event", ctz_json_new_string(type_str));
     ctz_json_object_set_value(event_obj, "name", ctz_json_new_string(name));
+    ctz_json_object_set_value(event_obj, "user", ctz_json_new_string(user ? user : "unknown"));
 
     if (node->time_format == TIME_REAL) {
         char time_buf[64];
@@ -1440,6 +1871,7 @@ void save_nodes() {
     fclose(f);
 }
 
+// --- REPLACE THIS FUNCTION ---
 void* stop_guardians_thread(void* arg) {
     (void)arg;
 
@@ -1447,14 +1879,37 @@ void* stop_guardians_thread(void* arg) {
     pthread_mutex_lock(&node_list_mutex);
     for (WatchedNode* n = watched_nodes_head; n; n = n->next) {
         if (n->is_auto) {
-            char exec_path[PATH_MAX];
-            char command[PATH_MAX + 128];
-            
-            snprintf(exec_path, sizeof(exec_path), "%s/.log/%s-guardian", n->path, n->name);
+            char username[64];
+            uid_t user_id;
+            char home_dir[PATH_MAX];
+            char command[PATH_MAX + 256]; // Increased buffer
 
-            snprintf(command, sizeof(command), "pkill -f \"%s\"", exec_path);
+            // Get the node's owner UID and their home dir
+            if (get_user_from_path(n->path, username, sizeof(username), &user_id) != 0 || 
+                get_home_and_name_from_uid(user_id, username, sizeof(username), home_dir, sizeof(home_dir)) != 0) {
+                fprintf(stderr, "[Cloud] Could not find owner for node %s, skipping guardian stop.\n", n->name);
+                continue;
+            }
+
+            // Check if a systemd service file exists for this node
+            char service_path[PATH_MAX];
+            snprintf(service_path, sizeof(service_path), "%s/.config/systemd/user/%s.service", home_dir, n->name);
             
-            printf("[Cloud] ...stopping guardian for '%s' (pkill -f ...)\n", n->name);
+            if (access(service_path, F_OK) == 0) {
+                // Systemd mode: Stop the service using your hardcoded D-Bus path logic
+                printf("[Cloud] ...stopping systemd guardian for '%s'\n", n->name);
+                snprintf(command, sizeof(command), 
+                         "runuser -u %s -- sh -c 'export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%u/bus; /usr/bin/systemctl --user stop %s.service'", 
+                         username, (unsigned int)user_id, n->name);
+            } else {
+                // Desktop mode: Kill the process
+                printf("[Cloud] ...stopping desktop guardian for '%s'\n", n->name);
+                char exec_path[PATH_MAX];
+                snprintf(exec_path, sizeof(exec_path), "%s/.log/%s-guardian", n->path, n->name);
+                snprintf(command, sizeof(command), "pkill -f \"%s\"", exec_path);
+            }
+            
+            // Run the determined command
             system(command);
         }
     }
@@ -2140,6 +2595,118 @@ case MSG_REMOVE_NODE: {
                 break;
             }
 
+            case MSG_NODE_MAN_CREATE: {
+                const node_man_create_req_t* req = payload;
+                WatchedNode* node = find_node_by_name_locked(req->node_name);
+                char full_path[PATH_MAX];
+
+                if (!node) {
+                    ack.success = 0;
+                    snprintf(ack.details, sizeof(ack.details), "Node '%s' not found.", req->node_name);
+                } else if (get_full_node_path(node, req->path, full_path, sizeof(full_path)) != 0) {
+                    ack.success = 0;
+                    snprintf(ack.details, sizeof(ack.details), "Invalid or insecure path.");
+                } else {
+                    int result = -1;
+                    if (req->is_directory) {
+                        result = mkdir(full_path, 0755);
+                    } else {
+                        int fd = open(full_path, O_CREAT | O_WRONLY | O_EXCL, 0644);
+                        if (fd != -1) {
+                            close(fd);
+                            result = 0;
+                        } else {
+                            result = -1; // File might already exist
+                        }
+                    }
+                    
+                    if (result != 0) {
+                        ack.success = 0;
+                        snprintf(ack.details, sizeof(ack.details), "Failed to create: %s", strerror(errno));
+                    } else {
+                        snprintf(ack.details, sizeof(ack.details), "Created '%s'.", req->path);
+                    }
+                }
+                send_wrapped_response_zc(mesh, sender_pid, MSG_OPERATION_ACK, request_id, &ack, sizeof(ack));
+                break;
+            }
+
+            case MSG_NODE_MAN_DELETE: {
+                const node_man_delete_req_t* req = payload;
+                WatchedNode* node = find_node_by_name_locked(req->node_name);
+                char full_path[PATH_MAX];
+
+                if (!node) {
+                    ack.success = 0;
+                    snprintf(ack.details, sizeof(ack.details), "Node '%s' not found.", req->node_name);
+                } else if (get_full_node_path(node, req->path, full_path, sizeof(full_path)) != 0) {
+                    ack.success = 0;
+                    snprintf(ack.details, sizeof(ack.details), "Invalid or insecure path.");
+                } else {
+                    struct stat st;
+                    if (stat(full_path, &st) != 0) {
+                        ack.success = 0;
+                        snprintf(ack.details, sizeof(ack.details), "File/dir not found.");
+                    } else {
+                        
+                        if (secure_recursive_delete(full_path) != 0) {
+                            ack.success = 0;
+                            snprintf(ack.details, sizeof(ack.details), "Failed to delete: %s", strerror(errno));
+                        } else {
+                            snprintf(ack.details, sizeof(ack.details), "Deleted '%s'.", req->path);
+                        }
+                    }
+                }
+                send_wrapped_response_zc(mesh, sender_pid, MSG_OPERATION_ACK, request_id, &ack, sizeof(ack));
+                break;
+            }
+            
+            case MSG_NODE_MAN_MOVE:
+            case MSG_NODE_MAN_COPY: {
+                const node_man_move_copy_req_t* req = payload;
+                WatchedNode* src_node = find_node_by_name_locked(req->src_node);
+                WatchedNode* dest_node = find_node_by_name_locked(req->dest_node);
+                char src_full_path[PATH_MAX];
+                char dest_full_path[PATH_MAX];
+
+                if (!src_node || !dest_node) {
+                    ack.success = 0;
+                    snprintf(ack.details, sizeof(ack.details), "Source or destination node not found.");
+                } else if (get_full_node_path(src_node, req->src_path, src_full_path, sizeof(src_full_path)) != 0 ||
+                           get_full_node_path(dest_node, req->dest_path, dest_full_path, sizeof(dest_full_path)) != 0) {
+                    ack.success = 0;
+                    snprintf(ack.details, sizeof(ack.details), "Invalid or insecure source/dest path.");
+                } else {
+                    int result = -1;
+                    struct stat st;
+                    if (stat(src_full_path, &st) != 0) {
+                         ack.success = 0;
+                         snprintf(ack.details, sizeof(ack.details), "Source path not found.");
+                         send_wrapped_response_zc(mesh, sender_pid, MSG_OPERATION_ACK, request_id, &ack, sizeof(ack));
+                         break; // Exit switch case
+                    }
+
+                    if (msg_type == MSG_NODE_MAN_MOVE) {
+                        result = rename(src_full_path, dest_full_path);
+                    } else { // MSG_NODE_MAN_COPY
+                        if (S_ISDIR(st.st_mode)) {
+                            result = recursive_copy(src_full_path, dest_full_path);
+                        } else {
+                            result = copy_file(src_full_path, dest_full_path);
+                        }
+                    }
+
+                    if (result != 0) {
+                        ack.success = 0;
+                        snprintf(ack.details, sizeof(ack.details), "Operation failed: %s", strerror(errno));
+                    } else {
+                        snprintf(ack.details, sizeof(ack.details), "Operation successful.");
+                    }
+                }
+                send_wrapped_response_zc(mesh, sender_pid, MSG_OPERATION_ACK, request_id, &ack, sizeof(ack));
+                break;
+            }
+
             case MSG_PIN_ITEM: {
                 const pin_req_t* req = payload;
                 int found = 0;
@@ -2249,31 +2816,51 @@ case MSG_REMOVE_NODE: {
     pthread_mutex_lock(&node_list_mutex);
     for (WatchedNode* n = watched_nodes_head; n; n = n->next) {
         if (n->is_auto) {
-            char exec_path[PATH_MAX];
-            snprintf(exec_path, sizeof(exec_path), "%s/.log/%s-guardian", n->path, n->name);
+            char username[64];
+            uid_t user_id;
+            char home_dir[PATH_MAX];
 
-            printf("[Cloud] ...re-launching guardian for '%s'\n", n->name);
-            pid_t pid = fork();
-            if (pid == 0) {
-                char username[64];
-                uid_t user_id;
-                if (get_user_from_path(n->path, username, sizeof(username), &user_id) == 0) {
-                    // We found the user, drop privileges to that user
+            // Get the node's owner UID and their home dir
+            if (get_user_from_path(n->path, username, sizeof(username), &user_id) != 0 || 
+                get_home_and_name_from_uid(user_id, username, sizeof(username), home_dir, sizeof(home_dir)) != 0) {
+                fprintf(stderr, "[Cloud] Could not find owner for node %s, skipping guardian start.\n", n->name);
+                continue;
+            }
+
+            // Check if a systemd service file exists
+            char service_path[PATH_MAX];
+            snprintf(service_path, sizeof(service_path), "%s/.config/systemd/user/%s.service", home_dir, n->name);
+
+            if (access(service_path, F_OK) == 0) {
+                // Systemd mode: Start the service using your hardcoded D-Bus path logic
+                printf("[Cloud] ...re-launching systemd guardian for '%s'\n", n->name);
+                char command[PATH_MAX + 256];
+                snprintf(command, sizeof(command), 
+                         "runuser -u %s -- sh -c 'export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%u/bus; /usr/bin/systemctl --user start %s.service'", 
+                         username, (unsigned int)user_id, n->name);
+                system(command);
+            } else {
+                // Desktop mode: Relaunch the process manually
+                printf("[Cloud] ...re-launching desktop guardian for '%s'\n", n->name);
+                char exec_path[PATH_MAX];
+                snprintf(exec_path, sizeof(exec_path), "%s/.log/%s-guardian", n->path, n->name);
+                
+                pid_t pid = fork();
+                if (pid == 0) {
+                    // Child process
                     if (setuid(user_id) != 0) {
                         perror("[Cloud] setuid failed, guardian may not start");
                         // Don't exit, try to run anyway
                     }
-                } else {
-                    fprintf(stderr, "[Cloud] Warning: Could not find user for path %s. Running as current user.\n", n->path);
+                    
+                    execl(exec_path, exec_path, (char*)NULL);
+                    perror("[Cloud] execl failed for guardian");
+                    exit(1); // Exit child process if execl fails
+                    
+                } else if (pid < 0) {
+                    // Fork failed in parent
+                    perror("[Cloud] fork failed for guardian");
                 }
-                
-                execl(exec_path, exec_path, (char*)NULL);
-                perror("[Cloud] execl failed for guardian");
-                exit(1); // Exit child process if execl fails
-                
-            } else if (pid < 0) {
-                // Fork failed in parent
-                perror("[Cloud] fork failed for guardian");
             }
         }
     }

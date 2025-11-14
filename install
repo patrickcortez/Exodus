@@ -1,0 +1,85 @@
+#!/bin/bash
+#
+# Exodus Installer Script
+#
+# This script installs the compiled Exodus binaries to /usr/local/bin
+# so they can be run from anywhere in the system.
+#
+# It also creates the initial 'nodewatch.json' config file and 'data'
+# directory in the same location.
+#
+# Must be run with sudo or as root.
+#
+
+set -e
+
+# --- Configuration ---
+INSTALL_DIR="/usr/local/bin"
+DATA_DIR="$INSTALL_DIR/data"
+CONFIG_FILE="$INSTALL_DIR/nodewatch.json"
+SOURCE_DIR="bin"
+BINARIES=(
+    "exodus"
+    "exctl"
+    "exodus-tui"
+    "node-editor"
+    "cloud_daemon"
+    "query_daemon"
+    "exodus_snapshot"
+    "exodus-node-guardian"
+)
+
+# --- 1. Root Check ---
+if [ "$(id -u)" -ne 0 ]; then
+    echo "This script must be run with sudo or as root." >&2
+    exit 1
+fi
+
+# --- 2. Source Directory Check ---
+if [ ! -d "$SOURCE_DIR" ]; then
+    echo "Error: Source directory '$SOURCE_DIR/' not found." >&2
+    echo "Please run 'make' to compile the binaries first." >&2
+    exit 1
+fi
+
+echo "Installing Exodus binaries to $INSTALL_DIR..."
+
+# --- 3. Installation Loop ---
+for bin in "${BINARIES[@]}"; do
+    SOURCE_FILE="$SOURCE_DIR/$bin"
+    if [ ! -f "$SOURCE_FILE" ]; then
+        echo "WARNING: Binary '$bin' not found in '$SOURCE_DIR'. Skipping."
+        continue
+    fi
+    
+    echo "  -> Installing $bin"
+    # Use 'install' command to copy and set permissions (755 = rwxr-xr-x)
+    install -m 755 "$SOURCE_FILE" "$INSTALL_DIR"
+done
+
+# --- 4. Create Config File and Data Directory ---
+echo ""
+echo "Creating data directory and config file in $INSTALL_DIR..."
+
+if [ ! -d "$DATA_DIR" ]; then
+    echo "  -> Creating directory: $DATA_DIR"
+    mkdir -p "$DATA_DIR"
+    chmod 755 "$DATA_DIR"
+else
+    echo "  -> Directory '$DATA_DIR' already exists. Skipping."
+fi
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "  -> Creating empty config: $CONFIG_FILE"
+    # Initialize with an empty JSON object
+    echo "{}" > "$CONFIG_FILE"
+    # Set 664 (rw-rw-r--) so daemons/tools can write to it
+    chmod 664 "$CONFIG_FILE" 
+else
+    echo "  -> Config file '$CONFIG_FILE' already exists. Skipping."
+fi
+
+echo ""
+echo "Installation complete!"
+echo "Binaries, config file, and data directory are in place."
+echo "You can now run 'exodus', 'exctl', and 'exodus-tui' from anywhere."
