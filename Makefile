@@ -33,7 +33,8 @@ TARGETS = \
 	$(BIN_DIR)/exodus-node-guardian \
 	$(BIN_DIR)/query_daemon \
 	$(BIN_DIR)/exodus-tui \
-	$(BIN_DIR)/node-editor
+	$(BIN_DIR)/node-editor \
+	$(BIN_DIR)/exodus-signal
 
 # --- Main Rules ---
 
@@ -79,6 +80,9 @@ $(BIN_DIR)/exodus-tui: $(SRC_DIR)/exodus-tui.c $(CTZ_JSON_LIB) | $(BIN_DIR)
 # 8. node-editor
 $(BIN_DIR)/node-editor: $(SRC_DIR)/node-editor.c | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/node-editor.c $(LIBS_NCURSES)
+
+$(BIN_DIR)/exodus-signal: $(SRC_DIR)/exodus-signal.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(HDR_COMMON) | $(BIN_DIR)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-signal.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(LIBS_PTHREAD)
 
 # --- Cleanup Rule ---
 clean:
