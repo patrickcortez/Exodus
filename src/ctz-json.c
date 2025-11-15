@@ -13,9 +13,15 @@
 #include <math.h>
 #include <ctype.h>
 
+
 #define CTZ_CONTEXT_INIT_ERROR_BUFFER(ctx, buffer, size) do { (ctx)->error_buffer = buffer; (ctx)->error_buffer_size = size; if (size > 0) buffer[0] = '\0'; } while(0)
 #define CTZ_SET_ERROR(ctx, ...) do { if ((ctx)->error_buffer) snprintf((ctx)->error_buffer, (ctx)->error_buffer_size, __VA_ARGS__); } while(0)
 #define CTZ_EXPECT(ctx, ch) do { assert(*(ctx)->json == (ch)); (ctx)->json++; } while(0)
+
+//Forward Declerations
+int ctz_json_compare(const ctz_json_value* a, const ctz_json_value* b);
+ctz_json_value* ctz_json_duplicate(const ctz_json_value* value, int deep);
+
 
 typedef struct {
     const char* json;
@@ -799,4 +805,82 @@ ctz_json_value* ctz_json_find_object_value(const ctz_json_value* value, const ch
         }
     }
     return NULL;
+}
+
+int ctz_json_compare(const ctz_json_value* a, const ctz_json_value* b) {
+    if (a == b) return 0; // Same pointer
+    if (!a || !b) return 1; // One is null
+    if (a->type != b->type) return 1; // Different types
+
+    switch (a->type) {
+        case CTZ_JSON_NUMBER:
+            return a->u.number == b->u.number ? 0 : 1;
+        case CTZ_JSON_STRING:
+            if (a->u.string.len != b->u.string.len) return 1;
+            return memcmp(a->u.string.s, b->u.string.s, a->u.string.len);
+        case CTZ_JSON_ARRAY:
+            if (a->u.array.size != b->u.array.size) return 1;
+            for (size_t i = 0; i < a->u.array.size; i++) {
+                if (ctz_json_compare(a->u.array.e[i], b->u.array.e[i]) != 0) {
+                    return 1;
+                }
+            }
+            return 0; // All elements matched
+        case CTZ_JSON_OBJECT:
+            if (a->u.object.size != b->u.object.size) return 1;
+            for (size_t i = 0; i < a->u.object.size; i++) {
+                // Find matching key in 'b'
+                ctz_json_value* b_val = ctz_json_find_object_value(b, a->u.object.m[i].k);
+                if (!b_val) return 1; // Key missing in 'b'
+                if (ctz_json_compare(a->u.object.m[i].v, b_val) != 0) {
+                    return 1; // Values differ
+                }
+            }
+            return 0; // All key/value pairs matched
+        case CTZ_JSON_NULL:
+        case CTZ_JSON_TRUE:
+        case CTZ_JSON_FALSE:
+        default:
+            return 0; // Types are the same, so they are equal
+    }
+}
+
+ctz_json_value* ctz_json_duplicate(const ctz_json_value* value, int deep) {
+    if (!value) return NULL;
+    
+    ctz_json_value* new_val = NULL;
+    switch (value->type) {
+        case CTZ_JSON_NULL:   new_val = ctz_json_new_null(); break;
+        case CTZ_JSON_TRUE:   new_val = ctz_json_new_bool(1); break;
+        case CTZ_JSON_FALSE:  new_val = ctz_json_new_bool(0); break;
+        case CTZ_JSON_NUMBER: new_val = ctz_json_new_number(value->u.number); break;
+        case CTZ_JSON_STRING: new_val = ctz_json_new_string(value->u.string.s); break;
+        case CTZ_JSON_ARRAY:
+            new_val = ctz_json_new_array();
+            if (new_val && deep) {
+                for (size_t i = 0; i < value->u.array.size; i++) {
+                    ctz_json_value* elem_copy = ctz_json_duplicate(value->u.array.e[i], 1);
+                    if (!elem_copy) {
+                        ctz_json_free(new_val);
+                        return NULL; // Allocation failed
+                    }
+                    ctz_json_array_push_value(new_val, elem_copy);
+                }
+            }
+            break;
+        case CTZ_JSON_OBJECT:
+            new_val = ctz_json_new_object();
+            if (new_val && deep) {
+                for (size_t i = 0; i < value->u.object.size; i++) {
+                    ctz_json_value* val_copy = ctz_json_duplicate(value->u.object.m[i].v, 1);
+                    if (!val_copy) {
+                        ctz_json_free(new_val);
+                        return NULL; // Allocation failed
+                    }
+                    ctz_json_object_set_value(new_val, value->u.object.m[i].k, val_copy);
+                }
+            }
+            break;
+    }
+    return new_val;
 }
