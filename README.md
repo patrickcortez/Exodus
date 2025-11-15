@@ -33,66 +33,77 @@ exodus start
 
 [Daemon & Service Management]
 
-  start        Start the Exodus cloud and query daemons
-  stop         Stop the Exodus daemons
+  start:        Start the Exodus cloud and query daemons
+  stop:         Stop the Exodus daemons
 
 [Node Configuration & TUI]
 
-  node-conf    Configure a node's auto-surveillance and settings
-  node-status  Show uncommitted changes for a node
-  node-edit    Open the TUI to browse and edit files in nodes with built in Text Editor
-  node-man     Create, delete, move, or copy files/dirs within a node
+  node-conf:    Configure a node's auto-surveillance and settings
+  node-status:  Show uncommitted changes for a node
+  node-edit:    Open the TUI to browse and edit files in nodes with built in Text Editor
+  node-man:     Create, delete, move, or copy files/dirs within a node
 
 [Snapshot & History Management]
 
-  commit       Create a permanent, versioned snapshot of a node
-  rebuild      Restore a node to a specific snapshot version (destructive)
-  checkout     Restore a single file from a specific snapshot
-  diff         Show changes between two snapshot versions
-  history      View History of a node(what changed in a node e.g: Modified, Created, Moved or Deleted)
-  log          Show the commit history for the active subsection
-  clean        Clear the uncommitted change history for a node
+  commit:       Create a permanent, versioned snapshot of a node
+  rebuild:      Restore a node to a specific snapshot version (destructive)
+  checkout:     Restore a single file from a specific snapshot
+  diff:         Show changes between two snapshot versions
+  history:      View History of a node(what changed in a node e.g: Modified, Created, Moved or Deleted)
+  log:          Show the commit history for the active subsection
+  clean:        Clear the uncommitted change history for a node
 
 [Subsection Management]
-  list-subs    List all subsections for a node
-  add-subs     Create a new subsection
-  remove-subs  Remove a subsection (cannot remove 'master' or active subsection)
-  switch       Switch active subsection (rebuilds node to new subsection's HEAD)
-  promote      Promote (merge) a subsection into 'master' (Trunk)
+  list-subs:    List all subsections for a node
+  add-subs:     Create a new subsection
+  remove-subs:  Remove a subsection (cannot remove 'master' or active subsection)
+  switch:       Switch active subsection (rebuilds node to new subsection's HEAD)
+  promote:      Promote (merge) a subsection into 'master' (Trunk)
 
 [Archiving & Data Transfer]
-  pack         Encrypt and archive a node into a .enode file
-  unpack       Decrypt and extract a .enode file
-  pack-info    Show metadata from an encrypted .enode file header
-  send         Send a .enode file to a remote receiver
-  expose-node  Start a receiver to accept .enode files
+  pack:         Encrypt and archive a node into a .enode file
+  unpack:       Decrypt and extract a .enode file
+  pack-info:    Show metadata from an encrypted .enode file header
+  send:         Send a .enode file to a remote receiver
+  expose-node:  Start a receiver to accept .enode files
 
 [Node Management]
 
-  add-node     Adds your project/directory as a new node
-  list-nodes   List all added nodes
-  remove-node  Deletes a node and remove it from the config
-  view-node    View recent events of a node
-  activate     Start real-time surveillance on an inactive node
-  deactivate   Stop real-time surveillance on an active node
-  attr-node    Set metadata (author, tag, desc) for a node
-  info-node    View metadata for a node
-  search-attr  Find nodes by author or tag
-  look         Find a file/folder, or pin it with 'look <file> --pin <name>'
-  unpin        Remove a pinned shortcut
+  add-node:     Adds your project/directory as a new node
+  list-nodes:   List all added nodes
+  remove-node:  Deletes a node and remove it from the config
+  view-node:    View recent events of a node
+  activate:     Start real-time surveillance on an inactive node
+  deactivate:   Stop real-time surveillance on an active node
+  attr-node:    Set metadata (author, tag, desc) for a node
+  info-node:    View metadata for a node
+  search-attr:  Find nodes by author or tag
+  look:         Find a file/folder, or pin it with 'look <file> --pin <name>'
+  unpin:        Remove a pinned shortcut
 
 [File Indexing]
 
-  upload       Upload a file for word indexing
-  find         Find a word in the last indexed file
-  change       Find and replace a word in the last indexed file
-  wc           Get the word count of the last indexed file
-  wl           Get the line count of the last indexed file
-  cc           Get the non-space character count of the last indexed file
+  upload:       Upload a file for word indexing
+  find:         Find a word in the last indexed file
+  change:       Find and replace a word in the last indexed file
+  wc:           Get the word count of the last indexed file
+  wl:           Get the line count of the last indexed file
+  cc:           Get the non-space character count of the last indexed file
+
+[Unit and Network Utility/Management]
+  unit-list:    List all connected Units on the network
+  view-unit:    List all nodes on a specific remote Unit
+  sync:         Sync history with a remote node (e.g., sync <unit> <remote-node> <local-node>)
+  unit-set:     Set this machine's name or coordinator (--name, --coord)
+
 
 [Concepts and Definitions]
 
 - Node: A directory on your filesystem that Exodus is tracking (e.g., /home/user/projects/my-site). This is the root of a versioned project.
+
+- Unit: A Device/Machine that has Exodus.
+
+- Coordinator: An Exodus Server for Synchronizing and Managing Units Across a Network.
 
 - Daemon: A background process that runs the Exodus system.
 
@@ -123,6 +134,8 @@ exodus start
 - Pack (.enode file): An encrypted, single-file archive of a node created with exodus pack. It is secured with AES-256 using your password and can be safely transferred.
 
 - TUI (exodus-tui): The Terminal User Interface. It's the ncurses-based file explorer for browsing nodes, viewing file statuses, and opening the built-in editor.
+
+- enode File: A Encrypted File that can be sent to other exodus users.
 
 
 Developer: Patrick Andrew Cortez
