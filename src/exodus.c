@@ -46,6 +46,12 @@
 #define PATH_MAX 4096
 #endif
 
+//Foward Declarations
+static int read_string_from_file(const char* fpath, char* buf, size_t buf_size);
+static void get_trunk_head_file(const char* node_path, char* path_buf, size_t buf_size);
+static void get_subsection_head_file(const char* node_path, const char* subsection_name, char* path_buf, size_t buf_size);
+static int get_commit_hash_for_subsection(const char* node_path, const char* subsection_name, char* hash_out, size_t hash_size);
+
 // ============================================================================
 // BEGIN: EMBEDDED TINY-SHA256 (Public Domain)
 // Source: https://github.com/amosnier/sha-2
@@ -386,7 +392,6 @@ static void InvMixColumns(uint8_t (*state)[4]) {
   }
 }
 
-// --- FIX: Removed incorrect '(*state)' wrapper ---
 static void InvSubBytes(uint8_t (*state)[4]) {
   uint8_t i, j;
   for (i = 0; i < 4; ++i) {
@@ -396,7 +401,20 @@ static void InvSubBytes(uint8_t (*state)[4]) {
   }
 }
 
-// --- FIX: Removed incorrect '(*state)' wrapper ---
+static void write_to_handle(cortez_write_handle_t* h, const void* data, size_t size) {
+    size_t part1_size;
+    char* part1 = cortez_write_handle_get_part1(h, &part1_size);
+    
+    if (size <= part1_size) {
+        memcpy(part1, data, size);
+    } else {
+        size_t part2_size;
+        char* part2 = cortez_write_handle_get_part2(h, &part2_size);
+        memcpy(part1, data, part1_size);
+        memcpy(part2, (const char*)data + part1_size, size - part1_size);
+    }
+}
+
 static void InvShiftRows(uint8_t (*state)[4]) {
   uint8_t temp;
   temp = state[3][1];
@@ -549,6 +567,91 @@ static int get_user_uid_from_path(const char* path, uid_t* user_id) {
     return 0;
 }
 
+        typedef enum {
+            NET_STATE_NONE,         
+            NET_STATE_CREATED,
+            NET_STATE_MODIFIED,
+            NET_STATE_DELETED,
+            NET_STATE_TEMP_DELETED ,
+            NET_STATE_MOVED
+        } FileNetState;
+
+        typedef struct FileStatusNode {
+            char path[PATH_MAX];
+            FileNetState state;
+            int modify_count;
+            struct FileStatusNode* next;
+            char from_path[PATH_MAX];
+        } FileStatusNode;
+
+        FileStatusNode* find_or_create_status(FileStatusNode** head, const char* path) {
+            FileStatusNode* current = *head;
+            while (current) {
+                if (strcmp(current->path, path) == 0) {
+                    return current;
+                }
+                current = current->next;
+            }
+            
+            // Not found, create new one
+            FileStatusNode* new_node = (FileStatusNode*)calloc(1, sizeof(FileStatusNode));
+            if (!new_node) {
+                fprintf(stderr, "Out of memory processing status.\n");
+                return NULL; 
+            }
+            strncpy(new_node->path, path, PATH_MAX - 1);
+            new_node->state = NET_STATE_NONE; // Represents a committed file by default
+            new_node->next = *head;
+            *head = new_node;
+            return new_node;
+        }
+
+static const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static char* base64_encode(const unsigned char* data, size_t input_length, size_t* output_length) {
+    *output_length = 4 * ((input_length + 2) / 3);
+    char* encoded_data = malloc(*output_length + 1);
+    if (encoded_data == NULL) return NULL;
+
+    for (size_t i = 0, j = 0; i < input_length;) {
+        uint32_t octet_a = i < input_length ? data[i++] : 0;
+        uint32_t octet_b = i < input_length ? data[i++] : 0;
+        uint32_t octet_c = i < input_length ? data[i++] : 0;
+        uint32_t triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;
+
+        encoded_data[j++] = b64_table[(triple >> 3 * 6) & 0x3F];
+        encoded_data[j++] = b64_table[(triple >> 2 * 6) & 0x3F];
+        encoded_data[j++] = b64_table[(triple >> 1 * 6) & 0x3F];
+        encoded_data[j++] = b64_table[(triple >> 0 * 6) & 0x3F];
+    }
+
+    // Add padding
+    int mod_table[] = {0, 2, 1};
+    for (int i = 0; i < mod_table[input_length % 3]; i++)
+        encoded_data[*output_length - 1 - i] = '=';
+
+    encoded_data[*output_length] = '\0';
+    return encoded_data;
+}
+
+// --- NEW: Helper to read an entire file into a buffer ---
+static unsigned char* read_file_for_sync(const char* path, size_t* size) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    *size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    unsigned char* buffer = malloc(*size);
+    if (buffer) {
+        if (fread(buffer, 1, *size, f) != *size) {
+            free(buffer);
+            buffer = NULL;
+        }
+    }
+    fclose(f);
+    return buffer;
+}
+
 int get_executable_dir(char* buffer, size_t size) {
     char path_buf[PATH_MAX];
     ssize_t len = readlink("/proc/self/exe", path_buf, sizeof(path_buf) - 1);
@@ -565,6 +668,42 @@ int get_executable_dir(char* buffer, size_t size) {
     *last_slash = '\0';
     strncpy(buffer, path_buf, size - 1);
     buffer[size - 1] = '\0';
+    return 0;
+}
+
+static int read_string_from_file(const char* fpath, char* buf, size_t buf_size) {
+    FILE* f = fopen(fpath, "r");
+    if (!f) return -1;
+    if (fgets(buf, buf_size, f) == NULL) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    buf[strcspn(buf, "\n")] = 0;
+    return 0;
+}
+
+static void get_trunk_head_file(const char* node_path, char* path_buf, size_t buf_size) {
+    snprintf(path_buf, buf_size, "%s/.log/TRUNK_HEAD", node_path);
+}
+
+static void get_subsection_head_file(const char* node_path, const char* subsection_name, char* path_buf, size_t buf_size) {
+    snprintf(path_buf, buf_size, "%s/.log/subsections/%s.subsec", node_path, subsection_name);
+}
+
+static int get_commit_hash_for_subsection(const char* node_path, const char* subsection_name, char* hash_out, size_t hash_size) {
+    char head_file_path[PATH_MAX];
+    
+    if (strcmp(subsection_name, "master") == 0) {
+        get_trunk_head_file(node_path, head_file_path, sizeof(head_file_path));
+    } else {
+        get_subsection_head_file(node_path, subsection_name, head_file_path, sizeof(head_file_path));
+    }
+
+    if (read_string_from_file(head_file_path, hash_out, hash_size) != 0) {
+        hash_out[0] = '\0'; // Ensure it's empty on failure (e.g., unborn branch)
+        return -1;
+    }
     return 0;
 }
 
@@ -758,6 +897,7 @@ static int get_node_conf_path(const char* node_name, const char* node_path, char
     }
     return 0;
 }
+
 
 int find_node_path_in_config(const char* node_name, char* path_buffer, size_t buffer_size) {
     char exe_dir[PATH_MAX];
@@ -1656,6 +1796,317 @@ static void run_pack(int argc, char* argv[]) {
     remove(tmp_file);
 }
 
+static void run_unit_list(cortez_mesh_t* mesh, pid_t target_pid) {
+    int sent_ok = 0;
+    for (int i = 0; i < 5; i++) {
+        cortez_write_handle_t* h = cortez_mesh_begin_send_zc(mesh, target_pid, 1);
+        if (h) {
+            cortez_mesh_commit_send_zc(h, MSG_SIG_REQUEST_UNIT_LIST);
+            sent_ok = 1;
+            break;
+        }
+        usleep(100000);
+    }
+    
+    if (!sent_ok) {
+        fprintf(stderr, "Failed to send LIST_UNITS request.\n");
+        return;
+    }
+
+    printf("Waiting for response [10s]...\n");
+    cortez_msg_t* msg = cortez_mesh_read(mesh, 10000);
+    if (msg) {
+        if (cortez_msg_type(msg) == MSG_SIG_RESPONSE_UNIT_LIST) {
+            const char* json_body = (const char*)cortez_msg_payload(msg);
+            
+            ctz_json_value* root = ctz_json_parse(json_body, NULL, 0);
+            if (root && ctz_json_get_type(root) == CTZ_JSON_ARRAY) {
+                printf("--- Registered Units ---\n");
+                for (size_t i = 0; i < ctz_json_get_array_size(root); i++) {
+                    ctz_json_value* item = ctz_json_get_array_element(root, i);
+                    const char* name = ctz_json_get_string(ctz_json_find_object_value(item, "name"));
+                    const char* status = ctz_json_get_string(ctz_json_find_object_value(item, "status"));
+                    printf("  %s (%s)\n", name ? name : "??", status ? status : "??");
+                }
+                ctz_json_free(root);
+            } else {
+                fprintf(stderr, "Received invalid JSON from daemon.\n");
+            }
+        } else if (cortez_msg_type(msg) == MSG_OPERATION_ACK) {
+            const ack_t* ack = cortez_msg_payload(msg);
+            fprintf(stderr, "Error from daemon: %s\n", ack->details);
+        } else {
+            fprintf(stderr, "Received unexpected response type: %d\n", cortez_msg_type(msg));
+        }
+        cortez_mesh_msg_release(mesh, msg);
+    } else {
+        printf("No response from daemon (timeout).\n");
+    }
+}
+
+static void run_unit_set(int argc, char* argv[]) {
+    if (argc < 4) {
+        fprintf(stderr, "Usage: exodus unit-set <flag> [arguments...]\n");
+        fprintf(stderr, "  --name \"New Unit Name\"\n");
+        fprintf(stderr, "  --coord <ip_address> <port>\n");
+        return;
+    }
+
+    // Get the executable directory to find the config files
+    char exe_dir[PATH_MAX];
+    if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) {
+        fprintf(stderr, "Error: Could not determine executable directory to save config.\n");
+        return;
+    }
+    
+    char conf_path[PATH_MAX];
+    int restart_needed = 0;
+
+    // --- Handle --name flag ---
+    if (strcmp(argv[2], "--name") == 0) {
+        if (argc != 4) {
+            fprintf(stderr, "Usage: exodus unit-set --name \"New Unit Name\"\n");
+            return;
+        }
+        char* new_name = argv[3];
+        if (strlen(new_name) >= MAX_UNIT_NAME_LEN) {
+            fprintf(stderr, "Error: Unit name is too long (max %d chars).\n", MAX_UNIT_NAME_LEN - 1);
+            return;
+        }
+        
+        snprintf(conf_path, sizeof(conf_path), "%s/exodus-unit.conf", exe_dir);
+        
+        FILE* f = fopen(conf_path, "w");
+        if (!f) {
+            perror("Error: Could not write to unit config file");
+            fprintf(stderr, "Path: %s\n", conf_path);
+            return;
+        }
+        fprintf(f, "%s\n", new_name);
+        fclose(f);
+        
+        printf("Successfully set unit name to: \"%s\"\n", new_name);
+        restart_needed = 1;
+
+    // --- Handle --coord flag ---
+    } else if (strcmp(argv[2], "--coord") == 0) {
+        if (argc != 5) {
+            fprintf(stderr, "Usage: exodus unit-set --coord <ip_address> <port>\n");
+            return;
+        }
+        char* ip = argv[3];
+        char* port = argv[4];
+
+        char url_buffer[512];
+        snprintf(url_buffer, sizeof(url_buffer), "http://%s:%s", ip, port);
+
+        snprintf(conf_path, sizeof(conf_path), "%s/exodus-coord.conf", exe_dir);
+
+        FILE* f = fopen(conf_path, "w");
+        if (!f) {
+            perror("Error: Could not write to coordinator config file");
+            fprintf(stderr, "Path: %s\n", conf_path);
+            return;
+        }
+        fprintf(f, "%s\n", url_buffer);
+        fclose(f);
+
+        printf("Successfully set coordinator URL to: %s\n", url_buffer);
+        restart_needed = 1;
+
+    } else {
+        fprintf(stderr, "Error: Unknown flag '%s'. Use --name or --coord.\n", argv[2]);
+        return;
+    }
+
+    if (restart_needed) {
+        printf("Please restart the daemons for the change to take effect:\n");
+        printf("  sudo ./exodus stop\n");
+        printf("  sudo ./exodus start\n");
+    }
+}
+
+static void run_view_unit(cortez_mesh_t* mesh, pid_t target_pid, const char* unit_name) {
+    uint32_t payload_size = sizeof(sig_view_unit_req_t);
+    int sent_ok = 0;
+    for (int i = 0; i < 5; i++) {
+        cortez_write_handle_t* h = cortez_mesh_begin_send_zc(mesh, target_pid, payload_size);
+        if (h) {
+            size_t part1_size;
+            sig_view_unit_req_t* req = cortez_write_handle_get_part1(h, &part1_size);
+            strncpy(req->unit_name, unit_name, sizeof(req->unit_name) - 1);
+            cortez_mesh_commit_send_zc(h, MSG_SIG_REQUEST_VIEW_UNIT);
+            sent_ok = 1;
+            break;
+        }
+        usleep(100000);
+    }
+    
+    if (!sent_ok) {
+        fprintf(stderr, "Failed to send VIEW_UNIT request.\n");
+        return;
+    }
+
+    printf("Waiting for response [10s]...\n");
+    cortez_msg_t* msg = cortez_mesh_read(mesh, 10000);
+    if (msg) {
+        if (cortez_msg_type(msg) == MSG_SIG_RESPONSE_VIEW_UNIT) {
+            const char* json_body = (const char*)cortez_msg_payload(msg);
+            
+            ctz_json_value* root = ctz_json_parse(json_body, NULL, 0);
+            if (root && ctz_json_get_type(root) == CTZ_JSON_ARRAY) {
+                printf("--- Nodes on Unit '%s' ---\n", unit_name);
+                for (size_t i = 0; i < ctz_json_get_array_size(root); i++) {
+                    ctz_json_value* item = ctz_json_get_array_element(root, i);
+                    const char* name = ctz_json_get_string(ctz_json_find_object_value(item, "name"));
+                    printf("  - %s\n", name ? name : "??");
+                }
+                ctz_json_free(root);
+            } else {
+                 fprintf(stderr, "Received invalid JSON from daemon.\n");
+            }
+        } else if (cortez_msg_type(msg) == MSG_OPERATION_ACK) {
+            const ack_t* ack = cortez_msg_payload(msg);
+            fprintf(stderr, "Error from daemon: %s\n", ack->details);
+        } else {
+            fprintf(stderr, "Received unexpected response type: %d\n", cortez_msg_type(msg));
+        }
+        cortez_mesh_msg_release(mesh, msg);
+    } else {
+        printf("No response from daemon (timeout).\n");
+    }
+}
+
+static void run_sync_node(cortez_mesh_t* mesh, pid_t target_pid, 
+                          const char* unit_name, const char* remote_node, const char* local_node) {
+    
+    // 1. Find local node path
+    char local_node_path[PATH_MAX];
+    if (find_node_path_in_config(local_node, local_node_path, sizeof(local_node_path)) != 0) {
+        fprintf(stderr, "Error: Local node '%s' not found in config.\n", local_node);
+        return;
+    }
+    
+    // 2. Read local history.json
+    char local_history_path[PATH_MAX];
+    snprintf(local_history_path, sizeof(local_history_path), "%s/.log/history.json", local_node_path);
+    char error_buf[256];
+    ctz_json_value* history_json = ctz_json_load_file(local_history_path, error_buf, sizeof(error_buf));
+    if (!history_json) {
+        fprintf(stderr, "Error: Could not read local history file: %s (%s)\n", local_history_path, error_buf);
+        history_json = ctz_json_new_array(); // Send empty history
+    }
+
+    // 3. Create the master payload object: { "history": [...], "files": {} }
+    ctz_json_value* payload_obj = ctz_json_new_object();
+    ctz_json_object_set_value(payload_obj, "history", history_json);
+    ctz_json_value* files_obj = ctz_json_new_object();
+    ctz_json_object_set_value(payload_obj, "files", files_obj);
+
+    // 4. Find all "Created" and "Modified" files and add them to the payload
+    printf("Analyzing local history for new files...\n");
+    for (size_t i = 0; i < ctz_json_get_array_size(history_json); i++) {
+        ctz_json_value* event = ctz_json_get_array_element(history_json, i);
+        const char* event_str = ctz_json_get_string(ctz_json_find_object_value(event, "event"));
+        const char* name_str = ctz_json_get_string(ctz_json_find_object_value(event, "name"));
+        
+        if (!event_str || !name_str) continue;
+
+        if (strcmp(event_str, "Created") == 0 || strcmp(event_str, "Modified") == 0) {
+            // Check if we already added this file (to avoid duplicates)
+            if (ctz_json_find_object_value(files_obj, name_str) != NULL) {
+                continue;
+            }
+
+            char file_full_path[PATH_MAX];
+            snprintf(file_full_path, sizeof(file_full_path), "%s/%s", local_node_path, name_str);
+            
+            size_t file_size;
+            unsigned char* file_content = read_file_for_sync(file_full_path, &file_size);
+            if (!file_content) {
+                fprintf(stderr, "Warning: Could not read file %s, skipping...\n", name_str);
+                continue;
+            }
+            
+            printf("  > Bundling: %s (%zu bytes)\n", name_str, file_size);
+            
+            size_t b64_len;
+            char* b64_content = base64_encode(file_content, file_size, &b64_len);
+            free(file_content);
+            
+            if (!b64_content) {
+                fprintf(stderr, "Warning: Failed to encode file %s, skipping...\n", name_str);
+                continue;
+            }
+            
+            // --- FIXED: Use ctz_json_new_string and free the original b64 string ---
+            ctz_json_object_set_value(files_obj, name_str, ctz_json_new_string(b64_content));
+            free(b64_content); // Free the original, ctz-json has its own copy now.
+        }
+    }
+
+    // 5. Stringify the final payload
+    char* payload_json_string = ctz_json_stringify(payload_obj, 0); // 0 = compact
+    ctz_json_free(payload_obj); // Frees history_json, files_obj, and the *copies* of b64 strings
+    
+    if (!payload_json_string) {
+        fprintf(stderr, "Error: Failed to create final JSON payload.\n");
+        return;
+    }
+
+    size_t json_string_len = strlen(payload_json_string);
+    uint32_t total_payload_size = sizeof(sig_sync_req_t) + json_string_len + 1;
+    
+    printf("Total sync payload: %.2f KB\n", (double)total_payload_size / 1024.0);
+    
+    // 6. Prepare and send the request
+    sig_sync_req_t* req_header = calloc(1, total_payload_size);
+    if (!req_header) {
+        free(payload_json_string);
+        return;
+    }
+    
+    strncpy(req_header->target_unit, unit_name, sizeof(req_header->target_unit) - 1);
+    strncpy(req_header->remote_node, remote_node, sizeof(req_header->remote_node) - 1);
+    strncpy(req_header->local_node, local_node, sizeof(req_header->local_node) - 1);
+    memcpy(req_header->sync_payload_json, payload_json_string, json_string_len + 1);
+    free(payload_json_string);
+
+    // 7. Send
+    int sent_ok = 0;
+    for (int i = 0; i < 5; i++) {
+        cortez_write_handle_t* h = cortez_mesh_begin_send_zc(mesh, target_pid, total_payload_size);
+        if (h) {
+            write_to_handle(h, req_header, total_payload_size); // <-- This will now link correctly
+            cortez_mesh_commit_send_zc(h, MSG_SIG_REQUEST_SYNC_NODE);
+            sent_ok = 1;
+            break;
+        }
+        usleep(100000);
+    }
+    free(req_header);
+    
+    if (!sent_ok) {
+        fprintf(stderr, "Failed to send SYNC_NODE request.\n");
+        return;
+    }
+
+    // 8. Wait for ACK
+    printf("Waiting for sync ACK [30s]...\n");
+    cortez_msg_t* msg = cortez_mesh_read(mesh, 30000);
+    if (msg) {
+        if (cortez_msg_type(msg) == MSG_OPERATION_ACK) {
+            const ack_t* ack = cortez_msg_payload(msg);
+            printf("Result: %s (%s)\n", ack->success ? "Success" : "Failure", ack->details);
+        } else {
+            fprintf(stderr, "Received unexpected response type: %d\n", cortez_msg_type(msg));
+        }
+        cortez_mesh_msg_release(mesh, msg);
+    } else {
+        printf("No response from daemon (timeout).\n");
+    }
+}
+
 static void run_unpack(int argc, char* argv[]) {
     if (argc != 3) {
         fprintf(stderr, "Usage: exodus unpack <path/to/.enode file>\n");
@@ -2197,6 +2648,13 @@ static void print_detailed_usage(void) {
     fprintf(stderr, "  %-12s Get the line count of the last indexed file\n", "wl");
     fprintf(stderr, "  %-12s Get the non-space character count of the last indexed file\n", "cc");
     fprintf(stderr, "\n");
+
+    fprintf(stderr, "Unit & Network Synchronization\n");
+    fprintf(stderr, "  %-12s List all connected Units on the network\n", "unit-list");
+    fprintf(stderr, "  %-12s List all nodes on a specific remote Unit\n", "view-unit");
+    fprintf(stderr, "  %-12s Sync history with a remote node (e.g., sync <unit> <remote-node> <local-node>)\n", "sync");
+    fprintf(stderr, "  %-12s Set this machine's name or coordinator (--name, --coord)\n", "unit-set");
+    fprintf(stderr, "\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -2210,7 +2668,9 @@ int main(int argc, char* argv[]) {
     } else if (strcmp(argv[1], "stop") == 0) {
         stop_daemons();
     
-    } else if (strcmp(argv[1], "pack") == 0) {
+    } else if (strcmp(argv[1], "unit-set") == 0) {
+        run_unit_set(argc, argv);    
+    }else if (strcmp(argv[1], "pack") == 0) {
         run_pack(argc, argv);
 
     
@@ -2240,9 +2700,6 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         run_node_edit();
-    
-    }else if (strcmp(argv[1], "node-man") == 0) {
-        run_node_man(argc, argv);
     
     } else if (strcmp(argv[1], "list-subs") == 0) {
         if (argc != 3) {
@@ -2324,46 +2781,9 @@ int main(int argc, char* argv[]) {
              fprintf(stderr, "Failed to start add-subs process.\n");
         }
 
-    } else if (strcmp(argv[1], "remove-subs") == 0) {
+    }else if (strcmp(argv[1], "switch") == 0) {
         if (argc != 4) {
-            fprintf(stderr, "Usage: exodus remove-subs <node_name> <subsection_name>\n");
-            return 1;
-        }
-        char* node_name = argv[2];
-        char* sub_name = argv[3];
-        char node_path[PATH_MAX];
-        if (find_node_path_in_config(node_name, node_path, sizeof(node_path)) != 0) return 1;
-
-        if (strcmp(sub_name, "master") == 0) {
-            fprintf(stderr, "Error: Cannot remove the 'master' (Trunk) subsection.\n");
-            return 1;
-        }
-
-        char current_subsec_name[MAX_NODE_NAME_LEN];
-        get_current_subsection(node_path, current_subsec_name, sizeof(current_subsec_name));
-        if (strcmp(sub_name, current_subsec_name) == 0) {
-            fprintf(stderr, "Error: Cannot remove currently active subsection.\n");
-            fprintf(stderr, "Switch to another subsection first (e.g., 'exodus switch %s master').\n", node_name);
-            return 1;
-        }
-
-        char subsec_file_path[PATH_MAX];
-        snprintf(subsec_file_path, sizeof(subsec_file_path), "%s/.log/subsections/%s.subsec", node_path, sub_name);
-
-        if (access(subsec_file_path, F_OK) != 0) {
-            fprintf(stderr, "Error: Subsection '%s' does not exist.\n", sub_name);
-            return 1;
-        }
-        
-        if (remove(subsec_file_path) == 0) {
-            printf("Subsection '%s' file removed. Its object history is now orphaned.\n", sub_name);
-        } else {
-            perror("Error: Failed to remove subsection file");
-        }
-
-    } else if (strcmp(argv[1], "switch") == 0) {
-        if (argc != 4) {
-            fprintf(stderr, "Usage: exodus switch <node_name> <subsection_name>\n");fprintf(stderr, "  %-12s Show the commit history for the active subsection\n", "log");
+            fprintf(stderr, "Usage: exodus switch <node_name> <subsection_name>\n");
             return 1;
         }
         char* node_name = argv[2];
@@ -2399,17 +2819,13 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "Please run 'exodus commit' or 'exodus node-status' to review changes.\n");
             return 1;
         }
-
-        // 4. Write the new current subsection
-        char subsec_file_path[PATH_MAX];
-        snprintf(subsec_file_path, sizeof(subsec_file_path), "%s/.log/CURRENT_SUBSECTION", node_path);
-        FILE* f = fopen(subsec_file_path, "w");
-        if (!f) {
-            perror("Error: Could not write to CURRENT_SUBSECTION file");
-            return 1;
+        // 4. Get the commit hash for the CURRENT subsection (the "old" one)
+        char old_commit_hash[PATH_MAX]; // Using PATH_MAX for safety
+        if (get_commit_hash_for_subsection(node_path, current_subsec_name, old_commit_hash, sizeof(old_commit_hash)) != 0) {
+            // This means the head file is missing or unreadable.
+            fprintf(stderr, "Warning: Could not read HEAD for old subsection '%s'. Rebuild will treat it as empty.\n", current_subsec_name);
+            old_commit_hash[0] = '\0';
         }
-        fprintf(f, "%s\n", new_sub_name);
-        fclose(f);
 
         // 5. Trigger a "rebuild" to the new subsection's HEAD
         printf("Switched to subsection '%s'.\n", new_sub_name);
@@ -2419,15 +2835,27 @@ int main(int argc, char* argv[]) {
                                      CORTEZ_TYPE_STRING, "rebuild",
                                      CORTEZ_TYPE_STRING, node_name,
                                      CORTEZ_TYPE_STRING, node_path,
-                                     CORTEZ_TYPE_STRING, new_sub_name, // Pass the new subsection
-                                     CORTEZ_TYPE_STRING, "LATEST_HEAD", // Special tag
+                                     CORTEZ_TYPE_STRING, new_sub_name,      // Target subsection
+                                     CORTEZ_TYPE_STRING, "LATEST_HEAD",   // arg1 (target tag)
+                                     CORTEZ_TYPE_STRING, old_commit_hash, // arg2 (old commit)
                                      0);
+        
         if (result == 0) {
+            // 6. Write the new current subsection *after* successful rebuild
+            char subsec_file_path[PATH_MAX];
+            snprintf(subsec_file_path, sizeof(subsec_file_path), "%s/.log/CURRENT_SUBSECTION", node_path);
+            FILE* f = fopen(subsec_file_path, "w");
+            if (!f) {
+                perror("CRITICAL Error: Rebuild succeeded but failed to update CURRENT_SUBSECTION file");
+            } else {
+                fprintf(f, "%s\n", new_sub_name);
+                fclose(f);
+            }
+            
             printf("Rebuild complete. Working directory now matches subsection '%s'.\n", new_sub_name);
         } else {
-            fprintf(stderr, "Fatal: Failed to rebuild to new subsection HEAD.\n");
+            fprintf(stderr, "Fatal: Failed to rebuild to new subsection HEAD. Switch aborted.\n");
         }
-
     } else if (strcmp(argv[1], "promote") == 0) {
         if (argc != 5) {
             fprintf(stderr, "Usage: exodus promote <node_name> <subsection_name> <message>\n");
@@ -2712,46 +3140,6 @@ int main(int argc, char* argv[]) {
         if (!f) {
             fprintf(stderr, "Error: Could not open history file at %s.\n", history_path);
             return 1;
-        }
-        
-
-        typedef enum {
-            NET_STATE_NONE,         
-            NET_STATE_CREATED,
-            NET_STATE_MODIFIED,
-            NET_STATE_DELETED,
-            NET_STATE_TEMP_DELETED ,
-            NET_STATE_MOVED
-        } FileNetState;
-
-        typedef struct FileStatusNode {
-            char path[PATH_MAX];
-            FileNetState state;
-            int modify_count;
-            struct FileStatusNode* next;
-            char from_path[PATH_MAX];
-        } FileStatusNode;
-
-        FileStatusNode* find_or_create_status(FileStatusNode** head, const char* path) {
-            FileStatusNode* current = *head;
-            while (current) {
-                if (strcmp(current->path, path) == 0) {
-                    return current;
-                }
-                current = current->next;
-            }
-            
-            // Not found, create new one
-            FileStatusNode* new_node = (FileStatusNode*)calloc(1, sizeof(FileStatusNode));
-            if (!new_node) {
-                fprintf(stderr, "Out of memory processing status.\n");
-                return NULL; 
-            }
-            strncpy(new_node->path, path, PATH_MAX - 1);
-            new_node->state = NET_STATE_NONE; // Represents a committed file by default
-            new_node->next = *head;
-            *head = new_node;
-            return new_node;
         }
         
         fseek(f, 0, SEEK_END);
@@ -3054,11 +3442,20 @@ int main(int argc, char* argv[]) {
              return 1;
         }
         printf("Found query daemon with PID: %d\n", target_pid);
+                if (strcmp(argv[1], "unit-list") == 0 && argc == 2) {
+            run_unit_list(mesh, target_pid);
+        } else if (strcmp(argv[1], "view-unit") == 0 && argc == 3) {
+            run_view_unit(mesh, target_pid, argv[2]);
+        } else if (strcmp(argv[1], "sync") == 0 && argc == 5) {
+            run_sync_node(mesh, target_pid, argv[2], argv[3], argv[4]);
+        }else if (strcmp(argv[1], "node-man") == 0) {
+        run_node_man(argc, argv);
+        } else{
         int sent_ok = 0;
         int max_retries = 5;
         for (int i = 0; i < max_retries; i++) {
             cortez_write_handle_t* h = NULL;
-            if (strcmp(argv[1], "upload") == 0 && argc == 3) {
+        if (strcmp(argv[1], "upload") == 0 && argc == 3) {
                 char absolute_path[PATH_MAX];
                 if (realpath(argv[2], absolute_path) == NULL) {
                     perror("Error resolving file path");
@@ -3075,7 +3472,7 @@ int main(int argc, char* argv[]) {
                     cortez_mesh_commit_send_zc(h, MSG_UPLOAD_FILE);
                     sent_ok = 1;
                 }
-            } else if (strcmp(argv[1], "find") == 0 && argc == 3) {
+        } else if (strcmp(argv[1], "find") == 0 && argc == 3) {
                  const char* word = argv[2];
                  uint32_t payload_size = strlen(word) + 1;
                  h = cortez_mesh_begin_send_zc(mesh, target_pid, payload_size);
@@ -3288,7 +3685,9 @@ int main(int argc, char* argv[]) {
             printf("No response from daemon (timeout).\n");
         }
         cortez_mesh_shutdown(mesh);
-    }    
+        }    
+    }
+
 
     return 0;
 }

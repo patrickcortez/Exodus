@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <stdint.h>  
 #include <sys/uio.h>
+#include <sys/wait.h>
 
 #include "cortez-mesh.h"
 #include "exodus-common.h"
@@ -130,6 +131,8 @@ static char* file_content = NULL;
 static size_t file_size = 0;
 static char last_uploaded_file_path[PATH_MAX] = {0};
 static pid_t guardian_daemon_pid = 0;
+static char g_exe_dir[PATH_MAX] = {0};
+static pid_t g_signal_daemon_pid = 0; 
 
 static PendingMove* pending_move_head = NULL;
 static WatchDescriptorMap* wd_map_head = NULL;
@@ -349,6 +352,40 @@ static void free_lcs_matrix(int** matrix, int rows) {
     free(matrix);
 }
 
+static unsigned char* base64_decode(const char* data, size_t input_length, size_t* output_length) {
+    static const int b64_inv_table[] = { 
+        -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+        -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+        -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,62, -1,-1,-1,63,
+        52,53,54,55, 56,57,58,59, 60,61,-1,-1, -1, 0,-1,-1, // Note: 0 is for '=' padding
+        -1, 0, 1, 2,  3, 4, 5, 6,  7, 8, 9,10, 11,12,13,14,
+        15,16,17,18, 19,20,21,22, 23,24,25,-1, -1,-1,-1,-1,
+        -1,26,27,28, 29,30,31,32, 33,34,35,36, 37,38,39,40,
+        41,42,43,44, 45,46,47,48, 49,50,51,-1, -1,-1,-1,-1
+    };
+
+    if (input_length % 4 != 0) return NULL;
+    *output_length = (input_length / 4) * 3;
+    if (data[input_length - 1] == '=') (*output_length)--;
+    if (data[input_length - 2] == '=') (*output_length)--;
+
+    unsigned char* decoded_data = malloc(*output_length);
+    if (decoded_data == NULL) return NULL;
+
+    for (size_t i = 0, j = 0; i < input_length;) {
+        uint32_t sextet_a = data[i] == '=' ? 0 & i++ : b64_inv_table[(int)data[i++]];
+        uint32_t sextet_b = data[i] == '=' ? 0 & i++ : b64_inv_table[(int)data[i++]];
+        uint32_t sextet_c = data[i] == '=' ? 0 & i++ : b64_inv_table[(int)data[i++]];
+        uint32_t sextet_d = data[i] == '=' ? 0 & i++ : b64_inv_table[(int)data[i++]];
+        uint32_t triple = (sextet_a << 3 * 6) + (sextet_b << 2 * 6) + (sextet_c << 1 * 6) + (sextet_d << 0 * 6);
+
+        if (j < *output_length) decoded_data[j++] = (triple >> 2 * 8) & 0xFF;
+        if (j < *output_length) decoded_data[j++] = (triple >> 1 * 8) & 0xFF;
+        if (j < *output_length) decoded_data[j++] = (triple >> 0 * 8) & 0xFF;
+    }
+    return decoded_data;
+}
+
 static int get_home_and_name_from_uid(uid_t uid, char* name_buf, size_t name_size, char* home_buf, size_t home_size) {
     FILE* f = fopen("/etc/passwd", "r");
     if (!f) {
@@ -525,6 +562,23 @@ static void get_username_from_uid(uid_t uid, char* buf, size_t buf_size) {
     if (!found) {
         // Fallback already set, just return
         return;
+    }
+}
+
+static void write_to_handle_and_commit(cortez_mesh_t* mesh, pid_t target_pid, uint16_t msg_type, const void* data, size_t size) {
+    int sent_ok = 0;
+    for (int i = 0; i < 5; i++) { // Retry 5 times
+        cortez_write_handle_t* h = cortez_mesh_begin_send_zc(mesh, target_pid, size);
+        if (h) {
+            write_to_handle(h, data, size); // Use your existing helper
+            cortez_mesh_commit_send_zc(h, msg_type);
+            sent_ok = 1;
+            break;
+        }
+        usleep(100000); // Wait 100ms
+    }
+    if (!sent_ok) {
+        fprintf(stderr, "[Cloud] Failed to send message (type %d) to PID %d\n", msg_type, target_pid);
     }
 }
 
@@ -1739,6 +1793,311 @@ void initialize_node_log_file(const char* node_path) {
     }
 }
 
+static int compare_events_by_timestamp(const void* a, const void* b) {
+    const ctz_json_value* event_a = *(const ctz_json_value**)a;
+    const ctz_json_value* event_b = *(const ctz_json_value**)b;
+
+    ctz_json_value* ts_a_val = ctz_json_find_object_value(event_a, "timestamp");
+    ctz_json_value* ts_b_val = ctz_json_find_object_value(event_b, "timestamp");
+
+    // Handle missing timestamps (sort them to the end)
+    if (!ts_a_val && !ts_b_val) return 0;
+    if (!ts_a_val) return 1;  // a is "greater" (put at end)
+    if (!ts_b_val) return -1; // b is "greater" (put at end)
+
+    // Get types
+    ctz_json_type type_a = ctz_json_get_type(ts_a_val);
+    ctz_json_type type_b = ctz_json_get_type(ts_b_val);
+
+    // Both are numbers (Unix time)
+    if (type_a == CTZ_JSON_NUMBER && type_b == CTZ_JSON_NUMBER) {
+        double ts_a = ctz_json_get_number(ts_a_val);
+        double ts_b = ctz_json_get_number(ts_b_val);
+        if (ts_a < ts_b) return -1;
+        if (ts_a > ts_b) return 1;
+        return 0;
+    }
+    
+    // Both are strings (Real time)
+    if (type_a == CTZ_JSON_STRING && type_b == CTZ_JSON_STRING) {
+        const char* ts_a_str = ctz_json_get_string(ts_a_val);
+        const char* ts_b_str = ctz_json_get_string(ts_b_val);
+        return strcmp(ts_a_str, ts_b_str); // Chronological string sort
+    }
+
+
+    if (type_a == CTZ_JSON_NUMBER) return -1;
+    
+    return 1;
+}
+
+
+void send_local_node_list_to_signal(cortez_mesh_t* mesh) {
+    if (g_signal_daemon_pid == 0 || !mesh) return;
+
+    ctz_json_value* root_array = ctz_json_new_array();
+    if (!root_array) return;
+
+    pthread_mutex_lock(&node_list_mutex);
+    for (WatchedNode* n = watched_nodes_head; n; n = n->next) {
+        ctz_json_value* node_obj = ctz_json_new_object();
+        ctz_json_object_set_value(node_obj, "name", ctz_json_new_string(n->name));
+        ctz_json_object_set_value(node_obj, "desc", ctz_json_new_string(n->desc));
+        ctz_json_object_set_value(node_obj, "tag", ctz_json_new_string(n->tag));
+        ctz_json_array_push_value(root_array, node_obj);
+    }
+    pthread_mutex_unlock(&node_list_mutex);
+
+    char* json_body = ctz_json_stringify(root_array, 0);
+    ctz_json_free(root_array);
+    
+    if (json_body) {
+        printf("[Cloud] Sending updated node list to signal daemon.\n");
+        // We use request_id 0, as this isn't a reply
+        send_wrapped_response_zc(mesh, g_signal_daemon_pid, MSG_SIG_CACHE_NODE_LIST, 0, json_body, strlen(json_body) + 1);
+        free(json_body);
+    }
+}
+
+// --- COMPLETE: Function to merge and sort two history.json arrays ---
+ctz_json_value* merge_history_arrays(ctz_json_value* local_arr, ctz_json_value* remote_arr) {
+    if (!remote_arr || ctz_json_get_type(remote_arr) != CTZ_JSON_ARRAY) {
+        return local_arr ? ctz_json_duplicate(local_arr, 1) : ctz_json_new_array();
+    }
+    if (!local_arr || ctz_json_get_type(local_arr) != CTZ_JSON_ARRAY) {
+        return ctz_json_duplicate(remote_arr, 1);
+    }
+
+    size_t local_size = ctz_json_get_array_size(local_arr);
+    ctz_json_value* merged_arr = ctz_json_duplicate(local_arr, 1); // Start with local
+    
+    // Add remote events only if they don't already exist
+    for (size_t i = 0; i < ctz_json_get_array_size(remote_arr); i++) {
+        ctz_json_value* remote_event = ctz_json_get_array_element(remote_arr, i);
+        ctz_json_value* remote_ts_val = ctz_json_find_object_value(remote_event, "timestamp");
+        ctz_json_value* remote_name_val = ctz_json_find_object_value(remote_event, "name");
+        
+        if (!remote_ts_val || !remote_name_val) continue;
+
+        int duplicate = 0;
+        for (size_t j = 0; j < local_size; j++) { // Only check against original local array
+            ctz_json_value* local_event = ctz_json_get_array_element(local_arr, j);
+            ctz_json_value* local_ts_val = ctz_json_find_object_value(local_event, "timestamp");
+            ctz_json_value* local_name_val = ctz_json_find_object_value(local_event, "name");
+
+            if (!local_ts_val || !local_name_val) continue;
+
+            if (ctz_json_compare(remote_ts_val, local_ts_val) == 0 &&
+                ctz_json_compare(remote_name_val, local_name_val) == 0) {
+                duplicate = 1;
+                break;
+            }
+        }
+
+        if (!duplicate) {
+            ctz_json_array_push_value(merged_arr, ctz_json_duplicate(remote_event, 1));
+        }
+    }
+    
+    // --- Sort the merged array by timestamp ---
+    size_t merged_size = ctz_json_get_array_size(merged_arr);
+    if (merged_size > 1) {
+        // 1. Create a temporary array of pointers
+        ctz_json_value** sort_array = malloc(merged_size * sizeof(ctz_json_value*));
+        if (!sort_array) return merged_arr; // Failed to alloc, return unsorted
+
+        for (size_t i = 0; i < merged_size; i++) {
+            sort_array[i] = ctz_json_get_array_element(merged_arr, i);
+        }
+
+        // 2. Sort the temporary array using our helper
+        qsort(sort_array, merged_size, sizeof(ctz_json_value*), compare_events_by_timestamp);
+
+        // 3. Create a new, sorted JSON array
+        ctz_json_value* sorted_arr = ctz_json_new_array();
+        if (!sorted_arr) {
+            free(sort_array);
+            return merged_arr; // Failed to alloc, return unsorted
+        }
+
+        for (size_t i = 0; i < merged_size; i++) {
+
+            ctz_json_array_push_value(sorted_arr, ctz_json_duplicate(sort_array[i], 1));
+        }
+        
+        // 4. Clean up
+        free(sort_array);
+        ctz_json_free(merged_arr);
+        return sorted_arr;
+    }
+    
+    return merged_arr; 
+}
+
+void handle_incoming_sync_data(const sig_sync_data_t* req) {
+    printf("[Cloud] Received incoming sync payload for node '%s' from unit '%s'\n", 
+           req->target_node, req->source_unit);
+           
+    WatchedNode* node = find_node_by_name_locked(req->target_node);
+    if (!node) {
+        fprintf(stderr, "[Cloud] Error: Cannot apply sync, node '%s' not found.\n", req->target_node);
+        return;
+    }
+    
+    char error_buf[256];
+    ctz_json_value* payload_obj = ctz_json_parse(req->sync_payload_json, error_buf, sizeof(error_buf));
+    if (!payload_obj) {
+        fprintf(stderr, "[Cloud] Error: Failed to parse incoming payload: %s\n", error_buf);
+        return;
+    }
+    
+    ctz_json_value* remote_history = ctz_json_find_object_value(payload_obj, "history");
+    ctz_json_value* files_obj = ctz_json_find_object_value(payload_obj, "files");
+
+    if (!remote_history || !files_obj || ctz_json_get_type(remote_history) != CTZ_JSON_ARRAY || ctz_json_get_type(files_obj) != CTZ_JSON_OBJECT) {
+        fprintf(stderr, "[Cloud] Error: Incoming payload is malformed (missing 'history' or 'files').\n");
+        ctz_json_free(payload_obj);
+        return;
+    }
+
+    char local_history_path[PATH_MAX];
+    snprintf(local_history_path, sizeof(local_history_path), "%s/.log/history.json", node->path);
+    ctz_json_value* local_history = ctz_json_load_file(local_history_path, NULL, 0);
+
+    // --- 1. Find ONLY the new events to apply ---
+    ctz_json_value* events_to_apply = ctz_json_new_array();
+    if (!events_to_apply) {
+        ctz_json_free(payload_obj);
+        if (local_history) ctz_json_free(local_history);
+        return;
+    }
+
+    size_t local_size = (local_history && ctz_json_get_type(local_history) == CTZ_JSON_ARRAY) ? ctz_json_get_array_size(local_history) : 0;
+    
+    for (size_t i = 0; i < ctz_json_get_array_size(remote_history); i++) {
+        ctz_json_value* remote_event = ctz_json_get_array_element(remote_history, i);
+        
+        int duplicate = 0;
+        for (size_t j = 0; j < local_size; j++) {
+            ctz_json_value* local_event = ctz_json_get_array_element(local_history, j);
+            // Use the new full-object comparison function
+            if (ctz_json_compare(remote_event, local_event) == 0) {
+                duplicate = 1;
+                break;
+            }
+        }
+
+        if (!duplicate) {
+            ctz_json_array_push_value(events_to_apply, ctz_json_duplicate(remote_event, 1));
+        }
+    }
+
+    // --- 2. Apply the new events to the filesystem ---
+    printf("[Cloud] Found %zu new remote events to apply.\n", ctz_json_get_array_size(events_to_apply));
+    for (size_t i = 0; i < ctz_json_get_array_size(events_to_apply); i++) {
+        ctz_json_value* event = ctz_json_get_array_element(events_to_apply, i);
+        const char* event_str = ctz_json_get_string(ctz_json_find_object_value(event, "event"));
+        const char* name_str = ctz_json_get_string(ctz_json_find_object_value(event, "name"));
+
+        if (!event_str || !name_str) continue;
+        
+        char full_path[PATH_MAX];
+        if (get_full_node_path(node, name_str, full_path, sizeof(full_path)) != 0) {
+            fprintf(stderr, "  Warning: Skipping event for insecure path: %s\n", name_str);
+            continue;
+        }
+        
+        // --- APPLY CREATED / MODIFIED ---
+        if (strcmp(event_str, "Created") == 0 || strcmp(event_str, "Modified") == 0) {
+            ctz_json_value* file_b64_val = ctz_json_find_object_value(files_obj, name_str);
+            if (!file_b64_val) {
+                fprintf(stderr, "  Error: Skipping [%s] for %s. File content was not in payload.\n", event_str, name_str);
+                continue;
+            }
+            
+            const char* b64_str = ctz_json_get_string(file_b64_val);
+            size_t b64_len = strlen(b64_str);
+            size_t file_size;
+            unsigned char* file_content = base64_decode(b64_str, b64_len, &file_size);
+            
+            if (!file_content) {
+                fprintf(stderr, "  Error: Failed to decode Base64 for %s.\n", name_str);
+                continue;
+            }
+            
+            printf("  Applying [%s]: %s (%zu bytes)\n", event_str, name_str, file_size);
+            
+            // Ensure directory exists
+            char* dir_copy = strdup(full_path);
+            char* parent_dir = dirname(dir_copy);
+            if (parent_dir) {
+                char cmd[PATH_MAX + 10];
+                snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", parent_dir);
+                system(cmd);
+            }
+            free(dir_copy);
+
+            FILE* f = fopen(full_path, "wb");
+            if (f) {
+                fwrite(file_content, 1, file_size, f);
+                fclose(f);
+            } else {
+                fprintf(stderr, "  Error: Failed to write file to %s\n", full_path);
+            }
+            free(file_content);
+
+        // --- APPLY DELETED ---
+        } else if (strcmp(event_str, "Deleted") == 0) {
+            printf("  Applying [Delete]: %s\n", name_str);
+            secure_recursive_delete(full_path); // Use your secure delete
+        
+        // --- APPLY MOVED ---
+        } else if (strcmp(event_str, "Moved") == 0) {
+            ctz_json_value* changes = ctz_json_find_object_value(event, "changes");
+            if (changes) {
+                const char* from_str = ctz_json_get_string(ctz_json_find_object_value(changes, "from"));
+                const char* to_str = ctz_json_get_string(ctz_json_find_object_value(changes, "to"));
+                if (from_str && to_str) {
+                    char from_full_path[PATH_MAX];
+                    char to_full_path[PATH_MAX];
+                    if (get_full_node_path(node, from_str, from_full_path, sizeof(from_full_path)) == 0 &&
+                        get_full_node_path(node, to_str, to_full_path, sizeof(to_full_path)) == 0) {
+                        
+                        printf("  Applying [Move]: %s -> %s\n", from_str, to_str);
+                        rename(from_full_path, to_full_path);
+                    }
+                }
+            }
+        }
+    }
+    ctz_json_free(events_to_apply);
+
+    // --- 3. Save the newly merged and sorted history file ---
+    ctz_json_value* merged_history = merge_history_arrays(local_history, remote_history);
+    
+    char* json_output = ctz_json_stringify(merged_history, 1); // Pretty-print
+    if (json_output) {
+        FILE* f = fopen(local_history_path, "w");
+        if (f) {
+            fprintf(f, "%s", json_output);
+            fclose(f);
+            printf("[Cloud] Successfully merged and sorted remote history into '%s'.\n", node->name);
+        } else {
+            fprintf(stderr, "[Cloud] CRITICAL: Failed to write merged history file: %s\n", local_history_path);
+        }
+        free(json_output);
+    }
+    
+    // --- 4. Clean up ---
+    if (local_history) ctz_json_free(local_history);
+    // remote_history is part of payload_obj
+    if (merged_history) ctz_json_free(merged_history);
+    ctz_json_free(payload_obj); // This frees remote_history and files_obj
+    
+    // --- 5. Regenerate contents.json ---
+    generate_node_contents_json(node);
+}
+
 void load_nodes() {
     FILE* f = fopen(config_file_path, "rb");
     if (!f) return;
@@ -1871,7 +2230,6 @@ void save_nodes() {
     fclose(f);
 }
 
-// --- REPLACE THIS FUNCTION ---
 void* stop_guardians_thread(void* arg) {
     (void)arg;
 
@@ -1937,6 +2295,9 @@ int main() {
         cortez_mesh_shutdown(mesh);
         return 1;
     }
+
+    strncpy(g_exe_dir, exe_dir, sizeof(g_exe_dir) - 1);
+
     snprintf(config_file_path, sizeof(config_file_path), "%s/%s", exe_dir, NODE_CONFIG_FILE);
     printf("[Cloud] Using config file: %s\n", config_file_path);
 
@@ -1968,6 +2329,24 @@ int main() {
         printf("[Cloud] Guardian stop sequence finished.\n");
     }
 
+    char signal_daemon_path[PATH_MAX];
+    snprintf(signal_daemon_path, sizeof(signal_daemon_path), "%s/exodus-signal", g_exe_dir);
+
+    g_signal_daemon_pid = fork();
+    if (g_signal_daemon_pid == 0) {
+        // Child process
+        printf("[Cloud] Launching child process: %s\n", signal_daemon_path);
+        execl(signal_daemon_path, "exodus-signal", (char*)NULL);
+        perror("[Cloud] FATAL: execl exodus-signal failed");
+        exit(1);
+    } else if (g_signal_daemon_pid < 0) {
+        perror("[Cloud] FATAL: fork for exodus-signal failed");
+        g_signal_daemon_pid = 0;
+        fprintf(stderr, "[Cloud] WARNING: Network features will be disabled.\n");
+    } else {
+        printf("[Cloud] Started exodus-signal process with PID: %d\n", g_signal_daemon_pid);
+    }
+
     printf("[Cloud] Activating watches for all loaded nodes...\n");
     pthread_mutex_lock(&node_list_mutex);
     for (WatchedNode* n = watched_nodes_head; n; n = n->next) {
@@ -1983,12 +2362,43 @@ int main() {
     pthread_mutex_unlock(&node_list_mutex);
     printf("[Cloud] Initial surveillance activation complete.\n");
 
+    send_local_node_list_to_signal(mesh);
+
     while (keep_running) {
         cortez_msg_t* msg = cortez_mesh_read(mesh, 1000); // 1-second timeout
         if (!msg) continue;
 
         pid_t sender_pid = cortez_msg_sender_pid(msg);
         uint16_t msg_type = cortez_msg_type(msg);
+
+        if (sender_pid == g_signal_daemon_pid) {
+            switch (msg_type) {
+                case MSG_SIG_RESPONSE_UNIT_LIST:
+                case MSG_SIG_RESPONSE_VIEW_UNIT:
+                case MSG_OPERATION_ACK:
+                {
+                    printf("[Cloud] Received response from signal, forwarding to query daemon.\n");
+                    pid_t query_daemon_pid = cortez_mesh_find_peer_by_name(mesh, QUERY_DAEMON_NAME);
+                    if (query_daemon_pid > 0) {
+                        // Forward the *entire* payload, which includes the request_id
+                        write_to_handle_and_commit(mesh, query_daemon_pid, msg_type, 
+                                                   cortez_msg_payload(msg), 
+                                                   cortez_msg_payload_size(msg));
+                    } else {
+                        fprintf(stderr, "[Cloud] Cannot find query_daemon to forward response!\n");
+                    }
+                    break;
+                }
+                case MSG_SIG_SYNC_DATA:
+                    handle_incoming_sync_data((const sig_sync_data_t*)cortez_msg_payload(msg));
+                    break;
+                case MSG_SIG_STATUS_UPDATE:
+                    // TODO: Implement status update logic if needed
+                    break;
+            }
+            cortez_mesh_msg_release(mesh, msg);
+            continue; // Skip rest of loop
+        }
 
         if (msg_type == MSG_TERMINATE) {
             printf("[Cloud] Termination signal received.\n");
@@ -2320,12 +2730,17 @@ case MSG_CHANGE_WORD: {
                     generate_node_contents_json(new_node);
 
                    ack.success = 1;
+
                     snprintf(ack.details, sizeof(ack.details), "Node '%s' added.", new_node->name);
                     send_wrapped_response_zc(mesh, sender_pid, MSG_OPERATION_ACK, request_id, &ack, sizeof(ack));
                 } else {
                     ack.success = 0;
                     snprintf(ack.details, sizeof(ack.details), "Failed to allocate memory for new node.");
                     send_wrapped_response_zc(mesh, sender_pid, MSG_OPERATION_ACK, request_id, &ack, sizeof(ack));
+                }
+
+                if (ack.success) {
+                        send_local_node_list_to_signal(mesh);
                 }
 
                 break;
@@ -2470,6 +2885,10 @@ case MSG_REMOVE_NODE: {
     send_wrapped_response_zc(mesh, sender_pid, MSG_OPERATION_ACK, request_id, &ack, sizeof(ack));
     break;
 }
+
+                    if (ack.success) {
+                        send_local_node_list_to_signal(mesh);
+                    }
 
     case MSG_ATTR_NODE: {
             const attr_node_req_t* req = payload;
@@ -2769,6 +3188,24 @@ case MSG_REMOVE_NODE: {
                 break;
             }
 
+            case MSG_SIG_REQUEST_UNIT_LIST:
+                case MSG_SIG_REQUEST_VIEW_UNIT:
+                case MSG_SIG_REQUEST_SYNC_NODE:
+                {
+                    if (g_signal_daemon_pid == 0) {
+                        ack.success = 0;
+                        snprintf(ack.details, sizeof(ack.details), "Network signal daemon is not running.");
+                        send_wrapped_response_zc(mesh, sender_pid, MSG_OPERATION_ACK, request_id, &ack, sizeof(ack));
+                    } else {
+                        printf("[Cloud] Forwarding network request (type %d) to signal daemon.\n", msg_type);
+                        // Forward the *entire* wrapped payload (request_id + original payload)
+                        write_to_handle_and_commit(mesh, g_signal_daemon_pid, msg_type, 
+                                                   wrapped_payload, wrapped_payload_size);
+                        // The response will come back asynchronously
+                    }
+                    break;
+                }
+
             case MSG_UNPIN_ITEM: {
                 const unpin_req_t* req = payload;
                 char pin_path[PATH_MAX];
@@ -2808,6 +3245,17 @@ case MSG_REMOVE_NODE: {
 
     printf("[Cloud] Shutting down.\n");
     keep_running = 0; // Signal watcher thread to stop
+
+    if (g_signal_daemon_pid > 0) {
+        printf("[Cloud] Sending termination signal to exodus-signal (PID %d)...\n", g_signal_daemon_pid);
+        // Send via mesh first
+        send_wrapped_response_zc(mesh, g_signal_daemon_pid, MSG_TERMINATE, 0, "stop", 5);
+        sleep(1); // Give it a second to shut down
+        kill(g_signal_daemon_pid, SIGTERM);
+        waitpid(g_signal_daemon_pid, NULL, 0);
+        printf("[Cloud] exodus-signal shut down.\n");
+    }
+
     pthread_join(watcher_thread, NULL); // Wait for it
     close(inotify_fd);
 

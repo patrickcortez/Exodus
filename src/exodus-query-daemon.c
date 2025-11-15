@@ -113,7 +113,8 @@ int main() {
 
         // --- Handle requests from clients (e.g., 'exodus' CLI) ---
         if ((msg_type >= MSG_UPLOAD_FILE && msg_type <= MSG_COMMIT_NODE) || 
-            (msg_type >= MSG_NODE_MAN_CREATE && msg_type <= MSG_NODE_MAN_COPY)) {
+            (msg_type >= MSG_NODE_MAN_CREATE && msg_type <= MSG_NODE_MAN_COPY) ||
+            (msg_type >= MSG_SIG_REQUEST_UNIT_LIST && msg_type <= MSG_SIG_REQUEST_SYNC_NODE)) {
             printf("[Query] Received request (type %d) from client %d. Forwarding to cloud daemon.\n", msg_type, sender_pid);
 
             PendingRequest* new_req = malloc(sizeof(PendingRequest));
@@ -182,7 +183,11 @@ int main() {
             }
         
         // --- Handle responses from the cloud daemon ---
-        }else if ((msg_type >= MSG_QUERY_RESPONSE && msg_type <= MSG_INFO_NODE_RESPONSE) || msg_type == MSG_LOOKUP_RESPONSE){
+        }else if ((msg_type >= MSG_QUERY_RESPONSE && msg_type <= MSG_INFO_NODE_RESPONSE) || 
+                   msg_type == MSG_LOOKUP_RESPONSE ||
+                   msg_type == MSG_OPERATION_ACK || 
+                   msg_type == MSG_SIG_RESPONSE_UNIT_LIST || 
+                   msg_type == MSG_SIG_RESPONSE_VIEW_UNIT){
             if (sender_pid != cloud_daemon_pid) {
                  printf("[Query] WARNING: Received a response from an unknown source (%d), ignoring.\n", sender_pid);
                  cortez_mesh_msg_release(mesh, msg);

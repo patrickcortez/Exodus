@@ -23,8 +23,13 @@
 
 #include "ctz-json.h"
 #include "exodus-common.h"
+#include <linux/limits.h>
 
 // --- Struct Definitions (Copied from cloud-daemon) ---
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 typedef struct WatchDescriptorMap {
     int wd;

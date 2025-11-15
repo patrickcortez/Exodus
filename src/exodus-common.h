@@ -11,6 +11,7 @@
 #define CLOUD_DAEMON_NAME "cloud_daemon"
 #define QUERY_DAEMON_NAME "query_daemon"
 #define SNAPSHOT_DAEMON_NAME "snapshot_daemon"
+#define SIGNAL_DAEMON_NAME "exodus-signal" // <-- NEW
 
 // --- Message Types ---
 // Must be offset by MESH_MSG_USER_START
@@ -49,10 +50,8 @@ enum exodus_msg_types {
 
     MSG_INFO_NODE_RESPONSE = MESH_MSG_USER_START + 25,
     
-
     MSG_LOOKUP_RESPONSE = MESH_MSG_USER_START + 26,
-    MSG_REBUILD_NODE = MESH_MSG_USER_START + 27, // Use 27 to leave space
-        // ... after MSG_LOOKUP_RESPONSE
+    MSG_REBUILD_NODE = MESH_MSG_USER_START + 27, 
     MSG_SNAPSHOT_PROGRESS_FWD = MESH_MSG_USER_START + 28,
     
 
@@ -69,10 +68,33 @@ enum exodus_msg_types {
     MSG_NODE_MAN_MOVE = MESH_MSG_USER_START + 35,
     MSG_NODE_MAN_COPY = MESH_MSG_USER_START + 36,
 
+    // ===============================================
+    // BEGIN: LAN UNIT SYNC (Phase 1)
+    // ===============================================
+
+    // Client -> Query -> Cloud -> Signal (Requests for Coordinator)
+    MSG_SIG_REQUEST_UNIT_LIST = MESH_MSG_USER_START + 40, // Payload: (empty)
+    MSG_SIG_REQUEST_VIEW_UNIT = MESH_MSG_USER_START + 41, // Payload: sig_view_unit_req_t
+    MSG_SIG_REQUEST_SYNC_NODE = MESH_MSG_USER_START + 42, // Payload: sig_sync_req_t
+
+    // Signal -> Cloud (Responses from Coordinator)
+    MSG_SIG_RESPONSE_UNIT_LIST = MESH_MSG_USER_START + 43, // Payload: (json string)
+    MSG_SIG_RESPONSE_VIEW_UNIT = MESH_MSG_USER_START + 44, // Payload: (json string)
+    // MSG_OPERATION_ACK is reused for sync success/failure
+
+    // Cloud -> Signal (Internal Cache/Status)
+    MSG_SIG_CACHE_NODE_LIST = MESH_MSG_USER_START + 45, // Payload: (json string of node list)
+    MSG_SIG_STATUS_UPDATE   = MESH_MSG_USER_START + 46, // Payload: sig_status_update_t
+    
+    // Signal -> Cloud (Incoming data from other Units)
+    MSG_SIG_SYNC_DATA = MESH_MSG_USER_START + 47, // Payload: sig_sync_data_t
+
+    // ===============================================
+    // END: LAN UNIT SYNC (Phase 1)
+    // ===============================================
 
     // Exodus -> Daemons
     MSG_TERMINATE = MESH_MSG_USER_START + 99,
-
 };
 
 #define MAX_ATTR_LEN 128
@@ -81,7 +103,6 @@ enum exodus_msg_types {
 #define ATTR_FLAG_TAG    (1 << 2)
 
 // --- Message Payloads ---
-
 
 #define MAX_WORD_LEN 64
 typedef struct {
@@ -212,5 +233,43 @@ typedef struct {
     char dest_node[MAX_NODE_NAME_LEN];
     char dest_path[MAX_PATH_LEN];
 } node_man_move_copy_req_t;
+
+// ===============================================
+// BEGIN: LAN UNIT SYNC (Phase 1)
+// ===============================================
+
+#define MAX_UNIT_NAME_LEN 128
+#define MAX_SYNC_DATA_SIZE 4096 // For small history.json diffs
+
+// For MSG_SIG_REQUEST_VIEW_UNIT
+typedef struct {
+    char unit_name[MAX_UNIT_NAME_LEN];
+} sig_view_unit_req_t;
+
+// For MSG_SIG_REQUEST_SYNC_NODE
+typedef struct {
+    char target_unit[MAX_UNIT_NAME_LEN];
+    char remote_node[MAX_NODE_NAME_LEN];
+    char local_node[MAX_NODE_NAME_LEN];
+    char sync_payload_json[0]; 
+} sig_sync_req_t;
+
+// For MSG_SIG_STATUS_UPDATE
+typedef struct {
+    int connected; // 1 for connected, 0 for disconnected
+    char coordinator_url[256];
+} sig_status_update_t;
+
+// For MSG_SIG_SYNC_DATA (Incoming from another unit)
+typedef struct {
+    char source_unit[MAX_UNIT_NAME_LEN];
+    char target_node[MAX_NODE_NAME_LEN];
+    char sync_payload_json[0];
+} sig_sync_data_t;
+
+// ===============================================
+// END: LAN UNIT SYNC (Phase 1)
+// ===============================================
+
 
 #endif // EXODUS_COMMON_H

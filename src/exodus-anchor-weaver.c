@@ -39,6 +39,7 @@ static int find_file_in_tree(const char* current_tree_hash, const char* path_to_
                              double* entropy_out, char* type_out);
 static void free_lcs_matrix(int** matrix, int rows);
 
+
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
@@ -173,6 +174,8 @@ typedef struct ManifestData {
     float entropy_mean;
     uint8_t file_signature[64];
 } ManifestData;
+
+static ManifestData* read_mobj_object(const char* hash_hex);
 
 #define DBL_INT_ADD(a,b,c) if (a > 0xffffffff - (c)) ++(b); a += c;
 #define ROTLEFT(a,b)  (((a) << (b)) | ((a) >> (32-(b))))
@@ -1789,7 +1792,7 @@ error:
 
 static int deconstruct_file(const char* fpath, size_t fsize, uint32_t file_mode, 
                             const char* relative_path, char* manifest_hash_out, 
-                            float* entropy_mean_out)
+                            float* entropy_mean_out, const char* old_manifest_hash)
 {
     // --- 1. Handle Zero-Size File ---
     if (fsize == 0) {
@@ -1802,6 +1805,14 @@ static int deconstruct_file(const char* fpath, size_t fsize, uint32_t file_mode,
         manifest.entropy_mean = 0.0;
         
         return write_mobj_object(&manifest, manifest_hash_out);
+    }
+
+    ManifestData* old_manifest = NULL;
+    if (old_manifest_hash) {
+    old_manifest = read_mobj_object(old_manifest_hash);
+    if (old_manifest) {
+        log_msg("  > Comparing against %u blocks from parent manifest.", old_manifest->block_count);
+        }
     }
 
     // --- 2. Open and mmap the file for fast scanning ---
@@ -1860,50 +1871,85 @@ static int deconstruct_file(const char* fpath, size_t fsize, uint32_t file_mode,
         int at_max_size = (current_block_len == CDC_MAX_BLOCK);
         int at_eof      = (scan_pos == fsize - 1);
 
-        if (at_eof || at_max_size || (at_min_size && at_target)) {
-        found_boundary:; // Label for goto
-            size_t block_len = current_block_len;
-            const char* block_data = file_data + block_start;
-            uint64_t block_offset = (uint64_t)block_start;
-            
-            // --- 4. Process the block ---
-            uint8_t hash_raw[SHA256_BLOCK_SIZE];
-            char hash_hex[HASH_STR_LEN];
-            
-            sha256_buffer((const uint8_t*)block_data, block_len, hash_raw);
-            hex_encode(hash_raw, SHA256_BLOCK_SIZE, hash_hex);
-            
-            double entropy = calculate_entropy(block_data, block_len);
-            total_entropy_sum += entropy;
+if (at_eof || at_max_size || (at_min_size && at_target)) {
+    found_boundary:; // Label for goto
+        size_t block_len = current_block_len;
+        const char* block_data = file_data + block_start;
+        uint64_t block_offset = (uint64_t)block_start;
 
-            // Populate the .bblk header
-            BinaryBlockHeader bblk_header = {0};
-            bblk_header.entropy_score = (float)entropy;
-            bblk_header.original_offset = block_offset;
-            bblk_header.original_length = block_len;
-            bblk_header.crc32_checksum = crc32(0L, (const Bytef*)block_data, block_len);
-            // Parent hash is left as 0
+        // --- 4. Process the block ---
+        uint8_t hash_raw[SHA256_BLOCK_SIZE];
+        char hash_hex[HASH_STR_LEN];
 
-            // Write the .bblk object to disk
-            if (write_bblk_object(hash_hex, block_data, block_len, &bblk_header) != 0) {
-                log_msg("Failed to write binary block: %s", hash_hex);
-                munmap((void*)file_data, fsize);
-                free(block_list.blocks);
-                return -1;
+        sha256_buffer((const uint8_t*)block_data, block_len, hash_raw);
+        hex_encode(hash_raw, SHA256_BLOCK_SIZE, hash_hex);
+
+        double entropy = calculate_entropy(block_data, block_len);
+        total_entropy_sum += entropy;
+
+        // Populate the .bblk header
+        BinaryBlockHeader bblk_header = {0}; // Zeros parent_block_hash by default
+        bblk_header.entropy_score = (float)entropy;
+        bblk_header.original_offset = block_offset;
+        bblk_header.original_length = block_len;
+        bblk_header.crc32_checksum = crc32(0L, (const Bytef*)block_data, block_len);
+
+        //Find parent block hash (This is your "level" logic) ---
+        if (old_manifest) {
+            int hash_found_in_old = 0;
+            // Check if this *exact block* already existed (content-addressing)
+            // If so, it's not "new" and doesn't need a parent link.
+            for (uint32_t i = 0; i < old_manifest->block_count; i++) {
+                if (memcmp(old_manifest->blocks[i].block_hash, hash_raw, 32) == 0) {
+                    hash_found_in_old = 1;
+                    break;
+                }
             }
 
-            // Add this block to our in-memory manifest list
-            if (append_manifest_block(&block_list, hash_raw, block_offset, block_len) != 0) {
-                munmap((void*)file_data, fsize);
-                free(block_list.blocks);
-                return -1;
-            }
+            // If it's a new or modified block, find what it replaces
+            if (!hash_found_in_old) {
+                // Find a block in the old manifest that started at the *same offset*
+                for (uint32_t i = 0; i < old_manifest->block_count; i++) {
+                    if (old_manifest->blocks[i].offset == block_offset) {
 
-            // Start the next block
-            block_start = scan_pos + 1;
-            rolling_hash = 0;
+                        // We link this new block's header to the old block's hash.
+                        memcpy(bblk_header.parent_block_hash, old_manifest->blocks[i].block_hash, 32);
+
+                        // This log message shows the "level" link being created
+                        char parent_hash_hex[HASH_STR_LEN];
+                        hex_encode(old_manifest->blocks[i].block_hash, 32, parent_hash_hex);
+                        log_msg("    > Block %s (New) replaces %s (Old/Level1) at offset %llu",
+                                hash_hex, parent_hash_hex, (unsigned long long)block_offset);
+                        break;
+                    }
+                }
+            }
         }
+
+
+        // Write the .bblk object to disk.
+        // It's saved at its hash location, *with* the parent hash inside it.
+        if (write_bblk_object(hash_hex, block_data, block_len, &bblk_header) != 0) {
+            log_msg("Failed to write binary block: %s", hash_hex);
+            munmap((void*)file_data, fsize);
+            free(block_list.blocks);
+            if (old_manifest) free_manifest_data(old_manifest);
+            return -1;
+        }
+
+        // Add this block to our in-memory manifest list
+        if (append_manifest_block(&block_list, hash_raw, block_offset, block_len) != 0) {
+            munmap((void*)file_data, fsize);
+            free(block_list.blocks);
+            if (old_manifest) free_manifest_data(old_manifest);
+            return -1;
+        }
+
+        // Start the next block
+        block_start = scan_pos + 1;
+        rolling_hash = 0;
     }
+}
     
     // --- 5. Cleanup mmap ---
     munmap((void*)file_data, fsize);
@@ -1919,6 +1965,10 @@ static int deconstruct_file(const char* fpath, size_t fsize, uint32_t file_mode,
 
     int result = write_mobj_object(&manifest, manifest_hash_out);
 
+    if (old_manifest) {
+        free_manifest_data(old_manifest);
+    }
+
     *entropy_mean_out = manifest.entropy_mean;
     
     // --- 7. Final cleanup ---
@@ -1930,12 +1980,7 @@ static int deconstruct_file(const char* fpath, size_t fsize, uint32_t file_mode,
     return result;
 }
 
-/**
- * @brief Reads a Manifest (.mobj) object from the store.
- *
- * @param hash_hex  The 65-byte hex string hash of the manifest.
- * @return A new, populated ManifestData struct (must be free'd), or NULL on failure.
- */
+
 static ManifestData* read_mobj_object(const char* hash_hex) {
     char obj_path[PATH_MAX];
     get_mobj_object_path(hash_hex, obj_path);
@@ -2118,9 +2163,26 @@ static int hash_and_write_blob(const char* fpath, const char* parent_tree_hash,
         
         log_msg("  > DECONSTRUCT: %s (%.1fGB). Using SBDS.", 
                 relative_path, (double)fsize / (1024.0*1024.0*1024.0));
+
+        char old_manifest_hash[HASH_STR_LEN] = {0};
+        if (parent_tree_hash) {
+            char old_hash[HASH_STR_LEN];
+            mode_t old_mode;
+            double old_entropy;
+            char old_type = 0;
+            // Check the parent tree for this same file path
+            if (find_file_in_tree(parent_tree_hash, relative_path, old_hash, &old_mode, &old_entropy, &old_type) == 0) {
+                if (old_type == 'M') {
+                    // This file was a manifest in the parent. Use it to find block parents.
+                    strncpy(old_manifest_hash, old_hash, HASH_STR_LEN);
+                    log_msg("  > Found parent manifest %s to track block-level changes.", old_manifest_hash);
+                }
+            }
+        }
         
-        int result = deconstruct_file(fpath, fsize, st_fsize.st_mode, relative_path, 
-                                      hash_out, &mean_entropy);
+    int result = deconstruct_file(fpath, fsize, st_fsize.st_mode, relative_path, 
+                                      hash_out, &mean_entropy, 
+                                      old_manifest_hash[0] ? old_manifest_hash : NULL);
         
         *entropy_out = (double)mean_entropy;
         return result; // Return immediately
@@ -3589,65 +3651,238 @@ static int unpack_tree_recursive(const char* tree_hash, const char* current_dest
     return 0;
 }
 
-static void execute_rebuild_job(const char* node_name, const char* node_path, const char* version_tag) {
-    (void)node_name;
-    char commit_hash[HASH_STR_LEN] = {0};
-    char root_tree_hash[HASH_STR_LEN] = {0};
+static int unpack_file_entry(const char* hash, char type, mode_t mode, const char* dest_path) {
+    switch (type) {
+        case 'B': {
+            size_t blob_size;
+            char* blob_content = read_object(hash, &blob_size);
+            if (!blob_content) return -1;
+            FILE* f_blob = fopen(dest_path, "wb");
+            if (!f_blob) { free(blob_content); return -1; }
+            fwrite(blob_content, 1, blob_size, f_blob);
+            fclose(f_blob);
+            free(blob_content);
+            chmod(dest_path, mode);
+            break;
+        }
+        case 'L': {
+            size_t target_size;
+            char* target_content = read_object(hash, &target_size);
+            if (!target_content) return -1;
+            target_content[target_size] = '\0'; // read_object should do this, but for safety
+            symlink(target_content, dest_path);
+            free(target_content);
+            break;
+        }
+        case 'M': {
+            ManifestData* manifest = read_mobj_object(hash);
+            if (!manifest) {
+                log_msg("Error: Failed to read manifest object %s", hash);
+                return -1;
+            }
+            if (reconstruct_file_from_manifest(manifest, dest_path) != 0) {
+                log_msg("Error: Failed to reconstruct file from manifest %s", hash);
+                free_manifest_data(manifest);
+                return -1;
+            }
+            free_manifest_data(manifest);
+            break;
+        }
+        default:
+            log_msg("Error: Unknown type '%c' for unpack: %s", type, dest_path);
+            return -1;
+    }
+    return 0;
+}
 
-    // --- NEW: Find commit hash from tag ---
-    if (find_commit_hash_by_tag(node_path, version_tag, commit_hash) != 0) {
-        // Special case: LATEST_HEAD on an empty branch. Rebuild to empty.
+static int apply_tree_diff(const char* old_tree_hash, const char* new_tree_hash, const char* base_path) {
+    // 1. Parse both trees into component lists
+    // Note: parse_tree_for_merge is a bit of a misnomer, but it works perfectly
+    // 'o' = old, 't' = target/new
+    MergeEntry* list_o = parse_tree_for_merge(old_tree_hash, 'o');
+    MergeEntry* list_t = parse_tree_for_merge(new_tree_hash, 't');
+
+    // 2. Create one master list of all file/dir names
+    MergeEntry* master_list = NULL;
+    populate_master_list(&master_list, list_o, 'o');
+    populate_master_list(&master_list, list_t, 't');
+
+    free_merge_list(list_o);
+    free_merge_list(list_t);
+
+    // 3. Iterate the master list and apply changes
+    for (MergeEntry* me = master_list; me; me = me->next) {
+        char full_path[PATH_MAX];
+        snprintf(full_path, sizeof(full_path), "%s/%s", base_path, me->name);
+        
+        const char* relative_path_entry = full_path + strlen(g_node_root_path);
+        if (*relative_path_entry == '/') relative_path_entry++;
+
+        int existed_in_old = (me->type_o != 0);
+        int exists_in_new = (me->type_t != 0);
+
+        if (existed_in_old && !exists_in_new) {
+            // --- 1. DELETED ---
+            log_msg("Deleting: %s", relative_path_entry);
+            if (me->type_o == 'T') {
+                // We must recursively delete the directory's contents first
+                // A full implementation would use nftw, but for this,
+                // we'll just recurse with a NULL new_tree_hash.
+                apply_tree_diff(me->hash_o, NULL, full_path);
+                if (rmdir(full_path) != 0) {
+                     log_msg("Warning: rmdir failed for '%s': %s", full_path, strerror(errno));
+                }
+            } else {
+                if (remove(full_path) != 0) {
+                     log_msg("Warning: remove failed for '%s': %s", full_path, strerror(errno));
+                }
+            }
+        } else if (!existed_in_old && exists_in_new) {
+            // --- 2. NEW ---
+            log_msg("Creating: %s", relative_path_entry);
+            if (me->type_t == 'T') {
+                if (mkdir(full_path, me->mode_t | 0700) != 0 && errno != EEXIST) {
+                    log_msg("Failed to create dir '%s': %s", full_path, strerror(errno));
+                } else {
+                    apply_tree_diff(NULL, me->hash_t, full_path); // Recurse to populate
+                    chmod(full_path, me->mode_t);
+                }
+            } else {
+                unpack_file_entry(me->hash_t, me->type_t, me->mode_t, full_path);
+            }
+        } else if (existed_in_old && exists_in_new) {
+            // --- 3. POTENTIALLY MODIFIED ---
+            if (strcmp(me->hash_o, me->hash_t) == 0) {
+                // Hashes are identical. DO NOTHING.
+                continue;
+            }
+
+            // Hashes differ. This is an UPDATE.
+            log_msg("Updating: %s", relative_path_entry);
+
+            // Handle type changes (e.g., file to dir) by deleting old first
+            if (me->type_o != me->type_t) {
+                if (me->type_o == 'T') {
+                    apply_tree_diff(me->hash_o, NULL, full_path); // Recurse-delete
+                    rmdir(full_path);
+                } else {
+                    remove(full_path);
+                }
+            }
+            
+            // Now, create the new entry
+            if (me->type_t == 'T') {
+                if (me->type_o != 'T') { // If it wasn't a T before, mkdir
+                    mkdir(full_path, me->mode_t | 0700);
+                }
+                apply_tree_diff(me->hash_o, me->hash_t, full_path); // Recurse
+                chmod(full_path, me->mode_t);
+            } else {
+                unpack_file_entry(me->hash_t, me->type_t, me->mode_t, full_path);
+            }
+        }
+    }
+
+    free_merge_list(master_list);
+    return 0;
+}
+
+static void execute_rebuild_job(const char* node_name, const char* node_path, const char* version_tag, const char* old_commit_hash_from_ipc) {
+    (void)node_name;
+    
+    char old_commit_hash[HASH_STR_LEN] = {0};
+    char old_tree_hash[HASH_STR_LEN] = {0};
+    char new_commit_hash[HASH_STR_LEN] = {0};
+    char new_tree_hash[HASH_STR_LEN] = {0};
+
+    // --- 1. Get the CURRENT tree hash (if it exists) ---
+    if (old_commit_hash_from_ipc && old_commit_hash_from_ipc[0] != '\0') {
+        strncpy(old_commit_hash, old_commit_hash_from_ipc, HASH_STR_LEN - 1);
+        log_msg("Using explicit old commit %s as base for rebuild.", old_commit_hash);
+
+        // Now find its tree
+        size_t commit_size;
+        char* commit_content = read_object(old_commit_hash, &commit_size);
+        if (commit_content) {
+            char* ptr = strstr(commit_content, "tree ");
+            if (ptr) sscanf(ptr, "tree %64s", old_tree_hash);
+            free(commit_content);
+        }
+    } else {
+        // --- Fallback (Old, Flawed Logic) ---
+        // This is kept so old clients don't break, but it will fail on switch.
+        log_msg("Warning: No old commit provided to rebuild. Diff may be incorrect.");
+        char active_head_file[PATH_MAX];
+        get_active_head_file(node_path, active_head_file, sizeof(active_head_file)); // Gets TARGET head
+
+        if (read_string_from_file(active_head_file, old_commit_hash, sizeof(old_commit_hash)) == 0) {
+            size_t commit_size;
+            char* commit_content = read_object(old_commit_hash, &commit_size);
+            if (commit_content) {
+                char* ptr = strstr(commit_content, "tree ");
+                if (ptr) sscanf(ptr, "tree %64s", old_tree_hash);
+                free(commit_content);
+            }
+        }
+    }
+    
+    // --- 2. Find the TARGET commit and tree hash ---
+    // This part is correct, it uses g_current_subsection (the target)
+    if (find_commit_hash_by_tag(node_path, version_tag, new_commit_hash) != 0) {
         if (strcmp(version_tag, "LATEST_HEAD") == 0) {
             log_msg("Subsection '%s' is empty. Rebuilding to an empty state.", g_current_subsection);
-            root_tree_hash[0] = '\0';
-            commit_hash[0] = '\0';
+            new_commit_hash[0] = '\0'; // Target is "nothing"
         } else {
             log_msg("Error: Failed to find commit for tag '%s' in subsection '%s'", version_tag, g_current_subsection);
             return;
         }
     }
-    // --- END NEW ---
-
-    // --- NEW: Get tree from commit ---
-    if (commit_hash[0] != '\0') {
+    
+    if (new_commit_hash[0] != '\0') {
         size_t commit_size;
-        char* commit_content = read_object(commit_hash, &commit_size);
+        char* commit_content = read_object(new_commit_hash, &commit_size);
         if (!commit_content) {
-            log_msg("Error: Failed to read commit object: %s", commit_hash);
+            log_msg("Error: Failed to read target commit object: %s", new_commit_hash);
             return;
         }
         char* ptr = strstr(commit_content, "tree ");
-        if (!ptr || sscanf(ptr, "tree %64s", root_tree_hash) != 1) {
-            log_msg("Error: Corrupt commit object '%s'.", commit_hash);
+        if (!ptr || sscanf(ptr, "tree %64s", new_tree_hash) != 1) {
+            log_msg("Error: Corrupt commit object '%s'.", new_commit_hash);
             free(commit_content); return;
         }
         free(commit_content);
     }
-    // --- END NEW ---
     
-    log_msg("Clearing current node contents...");
-    strncpy(g_unlink_root_path, node_path, sizeof(g_unlink_root_path) - 1);
-    nftw(node_path, unlink_cb, 64, FTW_DEPTH | FTW_PHYS);
-
-    log_msg("Restoring node from version '%s' (commit %s)...", version_tag, commit_hash[0] ? commit_hash : "NULL");
-    strncpy(g_node_root_path, node_path, sizeof(g_node_root_path)-1);
-
-    if (root_tree_hash[0] != '\0') {
-        if (unpack_tree_recursive(root_tree_hash, node_path) != 0) {
-             log_msg("Error: Failed during tree unpack.");
-        }
-    } else {
-        log_msg("Unpacking empty tree.");
+    // This check is now meaningful.
+    if (old_tree_hash[0] != '\0' && new_tree_hash[0] != '\0' && 
+        strcmp(old_tree_hash, new_tree_hash) == 0) 
+    {
+        log_msg("Old tree and new tree are identical. Nothing to do.");
+        // We still update the HEAD file to point to the new commit
+        char active_head_file[PATH_MAX];
+        get_active_head_file(node_path, active_head_file, sizeof(active_head_file));
+        write_string_to_file(active_head_file, new_commit_hash);
+        return;
     }
+
+    log_msg("Applying changes to restore version '%s' (commit %s)...", 
+            version_tag, new_commit_hash[0] ? new_commit_hash : "NULL");
+
+    // --- 3. Apply the diff ---
+    strncpy(g_node_root_path, node_path, sizeof(g_node_root_path)-1);
     
-    // --- NEW: Update active HEAD file ---
-    char active_head_file[PATH_MAX];
-    get_active_head_file(node_path, active_head_file, sizeof(active_head_file));
-    write_string_to_file(active_head_file, commit_hash); // Will write empty string if no commit
-    // --- END NEW ---
-    log_msg("Rebuild complete.");
+    apply_tree_diff(old_tree_hash[0] ? old_tree_hash : NULL, 
+                    new_tree_hash[0] ? new_tree_hash : NULL, 
+                    node_path);
     
     g_node_root_path[0] = '\0';
+    
+    // --- 4. Update the active HEAD file to point to the new commit ---
+    char active_head_file[PATH_MAX];
+    get_active_head_file(node_path, active_head_file, sizeof(active_head_file));
+    write_string_to_file(active_head_file, new_commit_hash); 
+    
+    log_msg("Rebuild complete.");
 }
 
 static void execute_checkout_job(const char* node_name, const char* node_path, const char* version_tag, const char* file_path) {
@@ -3658,7 +3893,7 @@ static void execute_checkout_job(const char* node_name, const char* node_path, c
     double file_entropy;
     char object_type = 0; // 'B', 'L', or 'M'
 
-    // --- NEW: Find commit and tree hash ---
+    //Find commit and tree hash
     char commit_hash[HASH_STR_LEN] = {0};
     if (find_commit_hash_by_tag(node_path, version_tag, commit_hash) != 0) {
         log_msg("Error: Could not find version tag '%s' in subsection '%s'.", version_tag, g_current_subsection);
@@ -3676,15 +3911,15 @@ static void execute_checkout_job(const char* node_name, const char* node_path, c
         free(commit_content); return;
     }
     free(commit_content);
-    // --- END NEW ---
 
-    // --- MODIFIED: Use new find_file_in_tree signature ---
+
+    //use new find_file_in_tree signature
     if (find_file_in_tree(root_tree_hash, file_path, object_hash, &file_mode, &file_entropy, &object_type) != 0) {
         log_msg("Error: File '%s' not found in version '%s'.", file_path, version_tag);
         return;
     }
 
-    // --- Prepare destination path ---
+    //Prepare destination path
     char dest_path[PATH_MAX];
     snprintf(dest_path, sizeof(dest_path), "%s/%s", node_path, file_path);
 
@@ -3696,9 +3931,9 @@ static void execute_checkout_job(const char* node_name, const char* node_path, c
         free(dir_copy);
     }
 
-    // --- MODIFIED: Handle 'M' type ---
+    //Handle 'M' type
     if (object_type == 'M') {
-        // --- Reconstruct from Manifest ---
+        //Reconstruct from Manifest
         log_msg("Restoring manifest: %s", file_path);
         ManifestData* manifest = read_mobj_object(object_hash);
         if (!manifest) {
@@ -3810,14 +4045,14 @@ static void execute_log_job(const char* node_path) {
         }
 
         log_msg_diff("\n    %s\n", commit_tag);
-        // --- End Print ---
+        //End print
 
-        // Find the *next* parent
+        //Find the *next* parent
         char* parent_line = strstr(commit_content, "parent ");
         if (parent_line) {
             sscanf(parent_line, "parent %64s", current_commit_hash);
         } else {
-            current_commit_hash[0] = '\0'; // End of history
+            current_commit_hash[0] = '\0'; //end of history
         }
 
         free(commit_content);
@@ -3831,7 +4066,7 @@ static void execute_diff_job(const char* node_name, const char* node_path, const
     char tree2_hash[HASH_STR_LEN];
     char v2_committer[256] = "[unknown]";
 
-    // --- NEW: Find commit 1 and tree 1 ---
+    //Find commit 1 and tree 1
     char commit1_hash[HASH_STR_LEN] = {0};
     if (find_commit_hash_by_tag(node_path, v1_tag, commit1_hash) != 0) {
         log_msg("Error: Could not find version tag '%s' in subsection '%s'.", v1_tag, g_current_subsection);
@@ -3849,9 +4084,9 @@ static void execute_diff_job(const char* node_name, const char* node_path, const
         free(commit_content); return;
     }
     free(commit_content);
-    // --- END NEW ---
+
     
-    // --- NEW: Find commit 2 and tree 2 ---
+    //Find commit 2 and tree 2
     char commit2_hash[HASH_STR_LEN] = {0};
     if (find_commit_hash_by_tag(node_path, v2_tag, commit2_hash) != 0) {
         log_msg("Error: Could not find version tag '%s' in subsection '%s'.", v2_tag, g_current_subsection);
@@ -3973,7 +4208,7 @@ int main(int argc, char *argv[]) {
             log_msg("Received malformed IPC data for 'rebuild'.");
         } else {
             log_msg("Command: %s, Node: %s, Sub: %s, Tag: %s", command, node_name, g_current_subsection, arg1);
-            execute_rebuild_job(node_name, node_path, arg1); // arg1 is version_tag
+            execute_rebuild_job(node_name, node_path, arg1, arg2); // arg1 is version_tag
         }
     } else if (strcmp(command, "diff") == 0) {
         if (!arg1 || !arg2) {

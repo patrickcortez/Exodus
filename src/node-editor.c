@@ -12,7 +12,7 @@
  * - Arrow Keys, Backspace, Enter, Typing: Normal text editing
  *
  * COMPILE:
- * gcc -Wall -Wextra -O2 -o node-editor node-editor.c -lncursesw
+ * gcc -Wall -Wextra -O2 -o exodus-node-editor node-editor.c -lncursesw
  */
 
 #include <stdio.h>
