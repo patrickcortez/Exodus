@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+
+# --- Script Configuration ---
+set -euo pipefail
+
+# --- Logging Functions ---
+log_error() {
+    echo >&2 -e "\e[31m[ERROR]\e[0m $1"
+}
+
+log_info() {
+    echo -e "\e[34m[INFO]\e[0m $1"
+}
+
+log_warn() {
+    echo -e "\e[33m[WARN]\e[0m $1"
+}
+
+log_success() {
+    echo -e "\e[32m[SUCCESS]\e[0m $1"
+}
+
+# --- Variables (from install scripts) ---
+MODULE_NAME="cortez_tunnel"
+INSTALL_DIR="/usr/local/bin"
+DATA_DIR="$INSTALL_DIR/data"
+CONFIG_FILE="$INSTALL_DIR/nodewatch.json"
+
+BINARIES=(
+    "exodus"
+    "exctl"
+    "exodus-tui"
+    "node-editor"
+    "cloud_daemon"
+    "query_daemon"
+    "exodus_snapshot"
+    "exodus-node-guardian"
+    "exodus-signal"
+)
+
+# --- Uninstall Functions ---
+
+uninstall_kernel_module() {
+    log_info "--- Uninstalling Kernel Module ($MODULE_NAME) ---"
+    
+    # 1. Unload module if it's loaded
+    if lsmod | grep -q "^${MODULE_NAME}"; then
+        log_info "Unloading kernel module..."
+        rmmod "$MODULE_NAME" || log_warn "Failed to unload module (maybe it's in use?)."
+    else
+        log_info "Kernel module is not loaded."
+    fi
+
+    # 2. Remove auto-load config
+    local CONF_FILE="/etc/modules-load.d/${MODULE_NAME}.conf"
+    if [ -f "$CONF_FILE" ]; then
+        log_info "Removing module auto-load config..."
+        rm -f "$CONF_FILE"
+    fi
+
+    # 3. Remove udev rule
+    local UDEV_RULE="/etc/udev/rules.d/99-${MODULE_NAME}.rules"
+    if [ -f "$UDEV_RULE" ]; then
+        log_info "Removing udev rule..."
+        rm -f "$UDEV_RULE"
+        log_info "Reloading udev rules..."
+        udevadm control --reload-rules
+        udevadm trigger
+    fi
+
+    # 4. Remove module file
+    local KERNEL_VER
+    KERNEL_VER=$(uname -r)
+    local MODULE_PATH="/lib/modules/${KERNEL_VER}/extra/${MODULE_NAME}.ko"
+    
+    if [ -f "$MODULE_PATH" ]; then
+        log_info "Removing module file: $MODULE_PATH"
+        rm -f "$MODULE_PATH"
+        
+        # 5. Update module dependencies
+        log_info "Running depmod..."
+        depmod -a
+    else
+        log_warn "Module file not found at $MODULE_PATH. Skipping."
+    fi
+    log_info "Kernel module uninstallation complete."
+}
+
+uninstall_binaries() {
+    log_info "--- Uninstalling Binaries and Configs ---"
+
+    # 1. Remove all binaries
+    for bin in "${BINARIES[@]}"; do
+        local BIN_PATH="$INSTALL_DIR/$bin"
+        if [ -f "$BIN_PATH" ]; then
+            log_info "Removing $BIN_PATH"
+            rm -f "$BIN_PATH"
+        else
+            log_warn "Binary not found: $BIN_PATH. Skipping."
+        fi
+    done
+
+    # 2. Remove config file
+    if [ -f "$CONFIG_FILE" ]; then
+        log_info "Removing config file: $CONFIG_FILE"
+        rm -f "$CONFIG_FILE"
+    fi
+
+    # 3. Remove data directory (only if it's empty, as a safety measure)
+    if [ -d "$DATA_DIR" ]; then
+        if [ -z "$(ls -A "$DATA_DIR")" ]; then
+            log_info "Removing empty data directory: $DATA_DIR"
+            rmdir "$DATA_DIR"
+        else
+            log_warn "Data directory $DATA_DIR is not empty. Please remove it manually if you are sure."
+            log_warn "  rm -rf \"$DATA_DIR\""
+        fi
+    fi
+    log_info "Binary uninstallation complete."
+}
+
+# --- Main Execution ---
+
+main() {
+    if [ "$EUID" -ne 0 ]; then
+        log_error "This script must be run as root or with sudo."
+        exit 1
+    fi
+
+    log_info "This script will permanently remove Exodus and the Cortez kernel module."
+    log_warn "This will remove files from:"
+    echo "  - /usr/local/bin/"
+    echo "  - /etc/modules-load.d/"
+    echo "  - /etc/udev/rules.d/"
+    echo "  - /lib/modules/$(uname -r)/"
+    echo ""
+    
+    # Confirmation prompt
+    read -p "Are you sure you want to continue? (y/N): " -r
+    echo ""
+    if [[ ! $REPLY =~ ^[yY]$ ]]; then
+        log_error "Uninstallation cancelled."
+        exit 1
+    fi
+
+    uninstall_kernel_module
+    echo ""
+    uninstall_binaries
+    echo ""
+    
+    log_success "Uninstallation complete."
+    log_info "Some changes (like unloading the kernel module) may require a reboot to take full effect."
+}
+
+# Run the main function
+main
