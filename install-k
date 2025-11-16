@@ -1,19 +1,15 @@
 #!/bin/bash
 #
-# Exodus Kernel Module Installer
-#
-# This script installs the 'cortez_tunnel.ko' module into the
-# kernel modules directory, updates dependencies, and configures
-# it to load automatically on boot.
-#
-# Must be run with sudo or as root.
+# Exodus / Cortez Tunnel Kernel Module Installer
 #
 
 set -e
 
-# --- Configuration ---
 MODULE_NAME="cortez_tunnel"
 MODULE_FILE="${MODULE_NAME}.ko"
+
+# --- 0. Parse Group Argument ---
+REQUESTED_GROUP="$1"
 
 # --- 1. Root Check ---
 if [ "$(id -u)" -ne 0 ]; then
@@ -24,47 +20,88 @@ fi
 # --- 2. File Check ---
 if [ ! -f "$MODULE_FILE" ]; then
     echo "Error: Module file '$MODULE_FILE' not found in this directory." >&2
-    echo "Please place $MODULE_FILE in the same directory as this script." >&2
     exit 1
 fi
 
-# --- 3. Determine Install Path ---
+# --- 3. Determine Kernel Install Path ---
 KERNEL_VER=$(uname -r)
-# We use the 'extra' directory, which is standard for third-party modules.
 INSTALL_PATH="/lib/modules/${KERNEL_VER}/extra"
 
 echo "Installing $MODULE_FILE for kernel $KERNEL_VER..."
 
-# --- 4. Create Directory and Install ---
-echo " -> Creating directory: $INSTALL_PATH"
 mkdir -p "$INSTALL_PATH"
-
-echo " -> Copying module to $INSTALL_PATH"
-# Use 'install' to set correct permissions (644 = rw-r--r--)
 install -m 644 "$MODULE_FILE" "$INSTALL_PATH/"
 
-# --- 5. Update Module Dependencies ---
-echo " -> Running 'depmod -a' (updating module dependencies)..."
+echo " -> Running depmod..."
 depmod -a
 
-# --- 6. Configure Auto-load ---
-# This creates a file in /etc/modules-load.d/
+# --- 4. Determine group to use ---
+determine_group() {
+    # If the user passed an argument, validate it.
+    if [ -n "$REQUESTED_GROUP" ]; then
+        if getent group "$REQUESTED_GROUP" >/dev/null; then
+            echo "$REQUESTED_GROUP"
+            return
+        else
+            echo "Error: group '$REQUESTED_GROUP' does not exist." >&2
+            exit 1
+        fi
+    fi
+
+    # Otherwise: auto-detect a smart default group.
+    # We avoid system groups like root, daemon, bin.
+    USERNAME=$(logname 2>/dev/null || echo $SUDO_USER)
+    USER_GROUPS=$(id -nG "$USERNAME")
+
+    for g in $USER_GROUPS; do
+        case "$g" in
+            root|daemon|bin|adm|systemd-*|sudo)
+                ;;
+            *)
+                echo "$g"
+                return
+                ;;
+        esac
+    done
+
+    # Fallback: use the user's primary group
+    id -gn "$USERNAME"
+}
+
+GROUP_TO_USE=$(determine_group)
+
+echo "Using group: $GROUP_TO_USE"
+
+# --- 5. Ensure udev rule exists ---
+UDEV_RULE="/etc/udev/rules.d/99-${MODULE_NAME}.rules"
+
+echo "Creating udev rule at: $UDEV_RULE"
+
+cat <<EOF > "$UDEV_RULE"
+KERNEL=="$MODULE_NAME", GROUP="$GROUP_TO_USE", MODE="0660"
+EOF
+
+chmod 644 "$UDEV_RULE"
+
+# --- 6. Reload udev ---
+echo "Reloading udev rules..."
+udevadm control --reload-rules
+udevadm trigger
+
+# --- 7. Configure auto-load ---
 CONF_FILE="/etc/modules-load.d/${MODULE_NAME}.conf"
-echo " -> Configuring module to load on boot (at $CONF_FILE)..."
 echo "$MODULE_NAME" > "$CONF_FILE"
 chmod 644 "$CONF_FILE"
 
-echo ""
-echo "--- Installation Finished ---"
-echo "Attempting to load module '$MODULE_NAME' now..."
+echo "--- Loading module now ---"
+modprobe "$MODULE_NAME" || echo "Module may require reboot to load."
 
-# --- 7. Try to load the module right now ---
-if modprobe "$MODULE_NAME"; then
-    echo ">Successfully installed and loaded '$MODULE_NAME'."
-    echo ">It will now load automatically on every system boot."
-    echo ">You can check it with 'lsmod | grep $MODULE_NAME'"
-else
-    echo "!Module was installed and configured, but 'modprobe $MODULE_NAME' failed." >&2
-    echo "!This may be due to a compatibility issue or unmet dependencies." >&2
-    echo "!A reboot may be required to load it." >&2
-fi
+echo ""
+echo "> Installation complete!"
+echo "> Device will belong to group '$GROUP_TO_USE' (rw-rw----)"
+echo ""
+echo "If you need access without sudo, add your user to this group:"
+echo "    sudo usermod -aG $GROUP_TO_USE \$USER"
+echo ""
+echo "Check device:"
+echo "    ls -l /dev/$MODULE_NAME"

@@ -3,13 +3,7 @@
 # Exodus Installer Script
 #
 # This script installs the compiled Exodus binaries to /usr/local/bin
-# so they can be run from anywhere in the system.
-#
-# It also creates the initial 'nodewatch.json' config file and 'data'
-# directory in the same location.
-#
-# Must be run with sudo or as root.
-#
+
 
 set -e
 
@@ -27,6 +21,7 @@ BINARIES=(
     "query_daemon"
     "exodus_snapshot"
     "exodus-node-guardian"
+    "exodus-signal"
 )
 
 # --- 1. Root Check ---
