@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-# --- Script Configuration ---
+#Script Configuration
 set -euo pipefail
 
-# --- Logging Functions ---
+#Logging Functions
 log_error() {
     echo >&2 -e "\e[31m[ERROR]\e[0m $1"
 }
