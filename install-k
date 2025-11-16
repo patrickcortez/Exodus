@@ -6,7 +6,7 @@
 set -e
 
 MODULE_NAME="cortez_tunnel"
-MODULE_FILE="${MODULE_NAME}.ko"
+MODULE_FILE="k-module/${MODULE_NAME}.ko"
 
 # --- 0. Parse Group Argument ---
 REQUESTED_GROUP="$1"
