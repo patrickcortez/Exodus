@@ -1019,19 +1019,6 @@ static void run_node_man(int argc, char* argv[]) {
     char* context_node = argv[2];
     char* operation = argv[3];
 
-    cortez_mesh_t* mesh = cortez_mesh_init("exodus_client", NULL);
-    if (!mesh) {
-        fprintf(stderr, "Could not connect to exodus mesh. Are daemons running?\n");
-        return;
-    }
-    usleep(200000); 
-    pid_t target_pid = find_query_daemon_pid();
-    if (target_pid == 0) {
-         fprintf(stderr, "Could not find the query daemon.\n");
-         cortez_mesh_shutdown(mesh);
-         return;
-    }
-
     void* req_payload = NULL;
     uint32_t payload_size = 0;
     uint16_t msg_type = 0;
@@ -1044,7 +1031,6 @@ static void run_node_man(int argc, char* argv[]) {
             req.is_directory = 1;
         } else if (strcmp(argv[4], "file") != 0) {
             fprintf(stderr, "Error: --create type must be 'file' or 'dir'.\n");
-            cortez_mesh_shutdown(mesh);
             return;
         }
         
@@ -1066,14 +1052,11 @@ static void run_node_man(int argc, char* argv[]) {
     } else if ((strcmp(operation, "--move") == 0 || strcmp(operation, "--copy") == 0) && argc == 6) {
         node_man_move_copy_req_t req = {0};
         
-        // Source is always relative to the context node
         strncpy(req.src_node, context_node, sizeof(req.src_node) - 1);
         strncpy(req.src_path, argv[4], sizeof(req.src_path) - 1);
 
-        // Destination can be relative or inter-node
         if (parse_node_path(argv[5], context_node, req.dest_node, sizeof(req.dest_node), req.dest_path, sizeof(req.dest_path)) != 0) {
             fprintf(stderr, "Error: Invalid destination format '%s'.\n", argv[5]);
-            cortez_mesh_shutdown(mesh);
             return;
         }
 
@@ -1084,41 +1067,76 @@ static void run_node_man(int argc, char* argv[]) {
 
     } else {
         fprintf(stderr, "Error: Invalid operation or argument count for 'node-man'.\n");
-        cortez_mesh_shutdown(mesh);
+        return;
+    }
+    // --- End of payload building ---
+
+    cortez_mesh_t* mesh = cortez_mesh_init("exodus_client", NULL);
+    if (!mesh) {
+        fprintf(stderr, "Could not connect to exodus mesh. Are daemons running?\n");
+        free(req_payload); // Free payload on early exit
         return;
     }
 
-    // Send the request
-    int sent_ok = 0;
-    for (int i = 0; i < 5; i++) {
-        cortez_write_handle_t* h = cortez_mesh_begin_send_zc(mesh, target_pid, payload_size);
-        if (h) {
-            size_t part1_size;
-            void* buffer = cortez_write_handle_get_part1(h, &part1_size);
-            memcpy(buffer, req_payload, payload_size); // Assuming payload fits in part1
-            cortez_mesh_commit_send_zc(h, msg_type);
-            sent_ok = 1;
-            break;
+    int operation_complete = 0; // Flag to see if we ever got an ACK
+
+    // --- NEW: Main retry loop ---
+    for (int attempt = 1; attempt <= 5; attempt++) {
+        
+        // 1. Find the daemon (needs to be inside the loop)
+        pid_t target_pid = find_query_daemon_pid();
+        if (target_pid == 0) {
+             fprintf(stderr, "Attempt %d: Could not find the query daemon.\n", attempt);
+             if (attempt < 5) sleep(2); // Wait 2 seconds
+             continue; // Retry
         }
-        usleep(200000);
-    }
+
+        // 2. Send the request (this has its own *internal* 0.2s retry)
+        int sent_ok = 0;
+        for (int i = 0; i < 5; i++) {
+            cortez_write_handle_t* h = cortez_mesh_begin_send_zc(mesh, target_pid, payload_size);
+            if (h) {
+                size_t part1_size;
+                void* buffer = cortez_write_handle_get_part1(h, &part1_size);
+                memcpy(buffer, req_payload, payload_size); // Assuming payload fits in part1
+                cortez_mesh_commit_send_zc(h, msg_type);
+                sent_ok = 1;
+                break;
+            }
+            usleep(200000); // 0.2s sleep for send buffer contention
+        }
+
+        // 3. Wait for response
+        if (sent_ok) {
+            printf("Waiting for response...\n");
+            cortez_msg_t* msg = cortez_mesh_read(mesh, 10000); // 10 second timeout
+            if(msg) {
+                if(cortez_msg_type(msg) == MSG_OPERATION_ACK) {
+                    const ack_t* ack = cortez_msg_payload(msg);
+                    printf("Result: %s (%s)\n", ack->success ? "Success" : "Failure", ack->details);
+                    operation_complete = 1; // We got a response, so the op is done
+                    cortez_mesh_msg_release(mesh, msg);
+                    break; // Exit main retry loop (success or hard failure)
+                }
+                cortez_mesh_msg_release(mesh, msg);
+            } else {
+                // Read timed out
+                printf("Attempt %d: No response from daemon (timeout).\n", attempt);
+                if (attempt < 5) sleep(2); // Wait 2 seconds
+                // continue to next attempt...
+            }
+        } else {
+             // Send failed
+             fprintf(stderr, "Attempt %d: Failed to send message to query daemon.\n", attempt);
+             if (attempt < 5) sleep(2); // Wait 2 seconds
+             // continue to next attempt...
+        }
+    } // --- End of main retry loop ---
     
     free(req_payload); // Free the heap-allocated payload
 
-    if (sent_ok) {
-        printf("Waiting for response...\n");
-        cortez_msg_t* msg = cortez_mesh_read(mesh, 10000);
-        if(msg) {
-            if(cortez_msg_type(msg) == MSG_OPERATION_ACK) {
-                const ack_t* ack = cortez_msg_payload(msg);
-                printf("Result: %s (%s)\n", ack->success ? "Success" : "Failure", ack->details);
-            }
-            cortez_mesh_msg_release(mesh, msg);
-        } else {
-            printf("No response from daemon (timeout).\n");
-        }
-    } else {
-         fprintf(stderr, "Failed to send message to query daemon.\n");
+    if (!operation_complete) {
+        fprintf(stderr, "Operation failed after 5 attempts.\n");
     }
     
     cortez_mesh_shutdown(mesh);
@@ -3347,7 +3365,7 @@ int main(int argc, char* argv[]) {
             if (sent_ok) break;
             if (i < 4) {
                  printf("Query daemon not ready, retrying... (%d/5)\n", i + 1);
-                 usleep(200000);
+                 sleep(2);
             }
         }
         if (sent_ok) {

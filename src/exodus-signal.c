@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <time.h> 
 #include <stdarg.h>
+#include <syslog.h>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -195,6 +196,8 @@ void load_unit_config() {
     
     log_msg("Unit name loaded: %s", g_unit_name);
 }
+
+
 
 void send_to_cloud(uint16_t msg_type, const void* payload, uint32_t size) {
     if (!g_mesh || g_cloud_daemon_pid == 0) return;
@@ -578,8 +581,9 @@ void* handle_coordinator_request(void* arg) {
 
     log_msg("HTTP Server: Received request: %s", method_path_line);
     
-    char* method = strtok(method_path_line, " ");
-    char* path = strtok(NULL, " ");
+    char* saveptr_method;
+    char* method = strtok_r(method_path_line, " ", &saveptr_method);
+    char* path = strtok_r(NULL, " ", &saveptr_method);
     if (!method || !path) {
         close(sock_fd);
         free(buffer); // Free buffer
