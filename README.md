@@ -3,6 +3,12 @@ handles large files, all made in C. It has its own TUI for Editing Text Files,IP
 
 [Set Up]
 
+Exodus has minimal Dependencies, make sure to run:
+
+sudo ./install-dependencies.sh
+
+to check if the dependencies are all installed in your system.
+
 Run the makefile in terminal with:
 
 -make

@@ -1,18 +1,7 @@
 #!/usr/bin/env bash
-#
-# Robust, portable dependency installer for Linux distributions.
-# Installs: build-essential (gcc, make, etc.), zlib, openssl, libffi, ncurses.
-#
 
-# --- Script Configuration ---
-# set -e: Exit immediately if a command exits with a non-zero status.
-# set -u: Treat unset variables as an error.
-# set -o pipefail: The return value of a pipeline is the status of
-#                  the last command to exit with a non-zero status.
 set -euo pipefail
 
-# --- Logging Functions ---
-# (Used to add color and structure)
 log_error() {
     echo >&2 -e "\e[31m[ERROR]\e[0m $1"
 }
@@ -25,7 +14,49 @@ log_success() {
     echo -e "\e[32m[SUCCESS]\e[0m $1"
 }
 
-# --- Package Manager Install Functions ---
+check_dependencies() {
+    log_info "Checking for existing dependencies..."
+    local missing=0
+
+    if ! command -v gcc &> /dev/null; then
+        log_info "Build tool 'gcc' not found."
+        missing=1
+    fi
+    
+    if ! command -v make &> /dev/null; then
+        log_info "Build tool 'make' not found."
+        missing=1
+    fi
+
+    if ! command -v pkg-config &> /dev/null; then
+        log_info "'pkg-config' not found. Assuming development libraries are missing."
+
+        return 1
+    fi
+
+    if ! pkg-config --exists zlib; then
+        log_info "zlib (development) not found."
+        missing=1
+    fi
+    
+    if ! pkg-config --exists openssl; then
+        log_info "openssl (development) not found."
+        missing=1
+    fi
+    
+    if ! pkg-config --exists libffi; then
+        log_info "libffi (development) not found."
+        missing=1
+    fi
+    
+    if ! pkg-config --exists ncurses; then
+        log_info "ncurses (development) not found."
+        missing=1
+    fi
+
+    return $missing
+}
+
 
 install_apt() {
     log_info "Updating package lists..."
@@ -103,7 +134,6 @@ install_apk() {
         ncurses-dev
 }
 
-# --- Main Execution ---
 
 main() {
     if [ "$EUID" -ne 0 ]; then
@@ -111,6 +141,12 @@ main() {
         exit 1
     fi
 
+    if check_dependencies; then
+        log_success "All dependencies are already installed."
+        exit 0
+    else
+        log_info "One or more dependencies are missing. Proceeding with installation..."
+    fi
 
     if command -v apt-get &> /dev/null; then
         log_info "Detected Debian-based system (apt-get)."
