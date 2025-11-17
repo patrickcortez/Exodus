@@ -132,7 +132,8 @@ static size_t file_size = 0;
 static char last_uploaded_file_path[PATH_MAX] = {0};
 static pid_t guardian_daemon_pid = 0;
 static char g_exe_dir[PATH_MAX] = {0};
-static pid_t g_signal_daemon_pid = 0; 
+static pid_t g_signal_daemon_pid = 0;
+ 
 
 static PendingMove* pending_move_head = NULL;
 static WatchDescriptorMap* wd_map_head = NULL;
@@ -143,6 +144,7 @@ static pthread_mutex_t wd_map_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t file_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t node_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t pending_move_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 
 static char config_file_path[PATH_MAX] = {0};
 static int inotify_fd = -1;

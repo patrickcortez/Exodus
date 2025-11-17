@@ -549,33 +549,36 @@ void* coordinator_client_thread(void* arg) {
 
 void* handle_coordinator_request(void* arg) {
     int sock_fd = (int)(intptr_t)arg;
+    // Buffer for headers + small bodies.
     char* buffer = malloc(MAX_HTTP_BODY_SIZE + 1024);
-    if (!buffer) { close(sock_fd); return NULL; }
-    char response[8192];
+    if (!buffer) { 
+        close(sock_fd); 
+        return NULL; 
+    }
+    // Use a separate, smaller buffer for just the headers.
+    char header_buf[1024]; 
     
-    ssize_t n = read(sock_fd, buffer, MAX_HTTP_BODY_SIZE + 1023); // Changed buffer size
+    ssize_t n = read(sock_fd, buffer, MAX_HTTP_BODY_SIZE + 1023);
     if (n <= 0) {
         close(sock_fd);
-        free(buffer); // Free buffer
+        free(buffer);
         return NULL;
     }
     buffer[n] = '\0';
     
-    // --- PARSING FIX ---
     char* saveptr_line;
     char* method_path_line;
     char* body = strstr(buffer, "\r\n\r\n");
 
     if (body) {
-        *body = '\0'; // Temporarily terminate the header section
-        body += 4;    // Point body to the start of the actual content
+        *body = '\0'; 
+        body += 4;    
     }
     
-    // Now, strtok will only run on the header section
-    method_path_line = strtok_r(buffer, "\r\n", &saveptr_line); // Use strtok_r
+    method_path_line = strtok_r(buffer, "\r\n", &saveptr_line);
     if (!method_path_line) {
         close(sock_fd);
-        free(buffer); // Free buffer
+        free(buffer);
         return NULL;
     }
 
@@ -586,33 +589,47 @@ void* handle_coordinator_request(void* arg) {
     char* path = strtok_r(NULL, " ", &saveptr_method);
     if (!method || !path) {
         close(sock_fd);
-        free(buffer); // Free buffer
+        free(buffer); 
         return NULL;
     }
-    // --- END PARSING FIX ---
 
     if (strcmp(method, "GET") == 0 && strcmp(path, "/nodes_list") == 0) {
         pthread_mutex_lock(&g_node_cache_mutex);
+        
+        // --- START: MODIFIED LOGIC ---
         if (g_local_node_list_json) {
-            snprintf(response, sizeof(response), 
+            size_t body_len = strlen(g_local_node_list_json);
+            // 1. Send the headers
+            snprintf(header_buf, sizeof(header_buf), 
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: application/json\r\n"
-                "Content-Length: %zu\r\n\r\n%s",
-                strlen(g_local_node_list_json), g_local_node_list_json
+                "Content-Length: %zu\r\n"
+                "Connection: close\r\n\r\n", // Add Connection: close
+                body_len
             );
+            write(sock_fd, header_buf, strlen(header_buf));
+            
+            // 2. Send the (potentially large) JSON body
+            write(sock_fd, g_local_node_list_json, body_len);
+
         } else {
             const char* err = "[]";
-            snprintf(response, sizeof(response), 
+            size_t body_len = strlen(err);
+            snprintf(header_buf, sizeof(header_buf), 
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: application/json\r\n"
-                "Content-Length: %zu\r\n\r\n%s",
-                strlen(err), err
+                "Content-Length: %zu\r\n"
+                "Connection: close\r\n\r\n",
+                body_len
             );
+            write(sock_fd, header_buf, strlen(header_buf));
+            write(sock_fd, err, body_len);
         }
+        // --- END: MODIFIED LOGIC ---
+        
         pthread_mutex_unlock(&g_node_cache_mutex);
         
     } else if (strcmp(method, "POST") == 0 && strcmp(path, "/sync_incoming") == 0) {
-        // Body was already found and pointed to
         if (body) {
             char error_buf[128];
             ctz_json_value* root = ctz_json_parse(body, error_buf, sizeof(error_buf));
@@ -620,7 +637,6 @@ void* handle_coordinator_request(void* arg) {
                 const char* source_unit = ctz_json_get_string(ctz_json_find_object_value(root, "source_unit"));
                 const char* target_node = ctz_json_get_string(ctz_json_find_object_value(root, "target_node"));
                 
-                // We forward the *entire* payload JSON string
                 char* payload_json = ctz_json_stringify(root, 0);
 
                 if (source_unit && target_node && payload_json) {
@@ -642,23 +658,22 @@ void* handle_coordinator_request(void* arg) {
             }
         }
         
-        snprintf(response, sizeof(response), 
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: application/json\r\n"
-            "Content-Length: 15\r\n\r\n{\"status\":\"ok\"}"
-        );
+        const char* ok_resp = "HTTP/1.1 200 OK\r\n"
+                              "Content-Type: application/json\r\n"
+                              "Content-Length: 15\r\n"
+                              "Connection: close\r\n\r\n{\"status\":\"ok\"}";
+        write(sock_fd, ok_resp, strlen(ok_resp));
         
     } else {
-        snprintf(response, sizeof(response), 
-            "HTTP/1.1 404 Not Found\r\n"
-            "Content-Type: text/plain\r\n"
-            "Content-Length: 9\r\n\r\nNot Found"
-        );
+        const char* not_found_resp = "HTTP/1.1 404 Not Found\r\n"
+                                     "Content-Type: text/plain\r\n"
+                                     "Content-Length: 9\r\n"
+                                     "Connection: close\r\n\r\nNot Found";
+        write(sock_fd, not_found_resp, strlen(not_found_resp));
     }
     
-    write(sock_fd, response, strlen(response));
     close(sock_fd);
-    free(buffer); // Free the buffer
+    free(buffer); 
     return NULL;
 }
 
@@ -754,6 +769,36 @@ int main() {
 
     pthread_t mesh_tid, client_tid, server_tid;
     pthread_create(&mesh_tid, NULL, mesh_listener_thread, NULL);
+
+    log_msg("Waiting for initial node list from cloud daemon...");
+    while (g_keep_running) {
+        pthread_mutex_lock(&g_node_cache_mutex);
+        if (g_local_node_list_json != NULL) {
+            // Success! Cache is populated.
+            pthread_mutex_unlock(&g_node_cache_mutex);
+            log_msg("Initial node list received. Starting network services.");
+            break;
+        }
+        pthread_mutex_unlock(&g_node_cache_mutex);
+        
+        // Sanity check: Make sure cloud daemon is still alive
+        if (kill(g_cloud_daemon_pid, 0) != 0) {
+            log_msg("Error: Cloud daemon (PID %d) disappeared. Shutting down.", g_cloud_daemon_pid);
+            g_keep_running = 0; // Signal all threads to stop
+            break;
+        }
+        
+        sleep(1); // Wait and retry
+    }
+    
+    // Check if we broke the loop due to shutdown
+    if (!g_keep_running) {
+        log_msg("Shutdown initiated while waiting for node list.");
+        pthread_join(mesh_tid, NULL); // Wait for mesh listener to stop
+        cortez_mesh_shutdown(g_mesh);
+        return 0;
+    }
+
     pthread_create(&client_tid, NULL, coordinator_client_thread, NULL);
     pthread_create(&server_tid, NULL, http_server_thread, NULL);
 

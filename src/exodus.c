@@ -1969,7 +1969,12 @@ static void run_view_unit(cortez_mesh_t* mesh, pid_t target_pid, const char* uni
     cortez_msg_t* msg = cortez_mesh_read(mesh, 10000);
     if (msg) {
         if (cortez_msg_type(msg) == MSG_SIG_RESPONSE_VIEW_UNIT) {
-            const char* json_body = (const char*)cortez_msg_payload(msg);
+            if (cortez_msg_payload_size(msg) <= sizeof(uint64_t)) {
+                fprintf(stderr, "Received invalid (too small) response from daemon.\n");
+                cortez_mesh_msg_release(mesh, msg);
+                return;
+            }
+            const char* json_body = (const char*)cortez_msg_payload(msg) + sizeof(uint64_t);
             
             ctz_json_value* root = ctz_json_parse(json_body, NULL, 0);
             if (root && ctz_json_get_type(root) == CTZ_JSON_ARRAY) {
