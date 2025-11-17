@@ -7,9 +7,17 @@ Exodus has minimal Dependencies, make sure to run:
 
 sudo ./install-dependencies.sh
 
-to check if the dependencies are all installed in your system.
+to check if the dependencies are all installed in your system. Then after checking for dependencies
+make sure to compile the kernel modules, because the kernel module is a very important component that allows the mesh ipc to properly
+function and makes the communication between daemons possible:
 
-Run the makefile in terminal with:
+- cd k-module
+- make
+- cd ..
+
+then after they compile you can then cd out.
+
+Then Run the makefile in terminal with:
 
 -make
 
@@ -21,7 +29,7 @@ but make sure you make it executable fist:
 
 chmod +x install
 
-and the same with the kernel module installer:
+and do the same with the kernel module installer:
 
 chmod +x install
 
