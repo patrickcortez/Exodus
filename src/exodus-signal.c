@@ -166,6 +166,7 @@ void load_coordinator_config() {
                 log_msg("Warning: No coordinator profile marked as 'current'. Using defaults.");
             }
             set_free(cfg);
+            pthread_mutex_unlock(&g_config_mutex);
             return;
         }
     }
