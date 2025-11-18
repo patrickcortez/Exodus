@@ -4,7 +4,7 @@
 
 /*
  * Compile Command:
- * gcc -Wall -Wextra -O2 exodus.c cortez-mesh.o ctz-json.a cortez_ipc.o -o exodus -pthread
+ * gcc -Wall -Wextra -O2 exodus.c cortez-mesh.o ctz-json.a ctz-set.a cortez_ipc.o -o exodus -pthread
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1862,115 +1862,143 @@ static void run_unit_list(cortez_mesh_t* mesh, pid_t target_pid) {
     }
 }
 
+static int confirm_overwrite(const char* label, const char* current_val, const char* new_val) {
+    // Case 1: No existing value (First time setup) -> Auto-approve
+    if (current_val == NULL || strlen(current_val) == 0) {
+        return 1; 
+    }
+
+    // Case 2: Value is identical -> No change needed
+    if (strcmp(current_val, new_val) == 0) {
+        printf("Info: %s is already set to '%s'. No changes made.\n", label, new_val);
+        return 0; // Return 0 to skip write
+    }
+
+    // Case 3: Overwrite -> Prompt user
+    fprintf(stderr, "----------------------------------------\n");
+    fprintf(stderr, "Configuration Change Requested:\n");
+    fprintf(stderr, "  Current %-12s: %s\n", label, current_val);
+    fprintf(stderr, "  New     %-12s: %s\n", label, new_val);
+    fprintf(stderr, "----------------------------------------\n");
+    fprintf(stderr, "Overwrite this setting? [y/N] ");
+    
+    char response[32];
+    if (fgets(response, sizeof(response), stdin)) {
+        if (response[0] == 'y' || response[0] == 'Y') {
+            return 1;
+        }
+    }
+    printf("Operation cancelled.\n");
+    return -1; // -1 indicates cancellation
+}
+
 static void run_unit_set(int argc, char* argv[]) {
-    if (argc < 4) {
+    if (argc < 3) {
         fprintf(stderr, "Usage: exodus unit-set <flag> [arguments...]\n");
-        fprintf(stderr, "  --name \"New Unit Name\"\n");
-        fprintf(stderr, "  --coord <ip_address> <port>\n");
-        fprintf(stderr, "  --desig <path/to/dir>");
+        fprintf(stderr, "  --name <New Unit Name>      Set this unit's display name\n");
+        fprintf(stderr, "  --desg <path/to/storage>    Set the designated folder for incoming Pushes\n");
+        fprintf(stderr, "  --coord <ip> <port>         Set the Coordinator address\n");
         return;
     }
 
-    // Get the executable directory to find the config files
     char exe_dir[PATH_MAX];
     if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) {
-        fprintf(stderr, "Error: Could not determine executable directory to save config.\n");
+        fprintf(stderr, "Error: Could not determine executable directory.\n");
         return;
     }
-    
-    char conf_path[PATH_MAX];
-    int restart_needed = 0;
 
-    // --- Handle --name flag ---
-    if (strcmp(argv[2], "--name") == 0) {
-        if (argc != 4) {
-            fprintf(stderr, "Usage: exodus unit-set --name \"New Unit Name\"\n");
-            return;
-        }
-        char* new_name = argv[3];
-        if (strlen(new_name) >= MAX_UNIT_NAME_LEN) {
-            fprintf(stderr, "Error: Unit name is too long (max %d chars).\n", MAX_UNIT_NAME_LEN - 1);
-            return;
-        }
-        
-        snprintf(conf_path, sizeof(conf_path), "%s/exodus-unit.conf", exe_dir);
-        
-        FILE* f = fopen(conf_path, "w");
-        if (!f) {
-            perror("Error: Could not write to unit config file");
-            fprintf(stderr, "Path: %s\n", conf_path);
-            return;
-        }
-        fprintf(f, "%s\n", new_name);
-        fclose(f);
-        
-        printf("Successfully set unit name to: \"%s\"\n", new_name);
-        restart_needed = 1;
-
-    // --- Handle --coord flag ---
-    } else if (strcmp(argv[2], "--coord") == 0) {
+    // --- Handle Coordinator Config (Separate File) ---
+    if (strcmp(argv[2], "--coord") == 0) {
         if (argc != 5) {
             fprintf(stderr, "Usage: exodus unit-set --coord <ip_address> <port>\n");
             return;
         }
-        char* ip = argv[3];
-        char* port = argv[4];
-
-        char url_buffer[512];
-        snprintf(url_buffer, sizeof(url_buffer), "http://%s:%s", ip, port);
-
+        // Coordinator config is simple, just overwrite (less critical)
+        char conf_path[PATH_MAX];
         snprintf(conf_path, sizeof(conf_path), "%s/exodus-coord.conf", exe_dir);
-
         FILE* f = fopen(conf_path, "w");
-        if (!f) {
-            perror("Error: Could not write to coordinator config file");
-            fprintf(stderr, "Path: %s\n", conf_path);
-            return;
-        }
-        fprintf(f, "%s\n", url_buffer);
+        if (!f) { perror("Error writing coord config"); return; }
+        fprintf(f, "http://%s:%s\n", argv[3], argv[4]);
         fclose(f);
-
-        printf("Successfully set coordinator URL to: %s\n", url_buffer);
-        restart_needed = 1;
-
-    } else if (strcmp(argv[2], "--desig") == 0) {
-        if (argc != 4) {
-            fprintf(stderr, "Usage: exodus unit-set --desg <absolute_path>\n");
-            return;
-        }
-        char* path = argv[3];
-        char name[128] = "My-Exodus-Unit";
-        
-        // Preserve existing name
-        snprintf(conf_path, sizeof(conf_path), "%s/exodus-unit.conf", exe_dir);
-        FILE* f = fopen(conf_path, "r");
-        if (f) {
-            char line[1024];
-            while(fgets(line, sizeof(line), f)) {
-                line[strcspn(line, "\n")] = 0;
-                if (strncmp(line, "UNIT_NAME=", 10) == 0) strncpy(name, line+10, 127);
-            }
-            fclose(f);
-        }
-        
-        // Write new config
-        f = fopen(conf_path, "w");
-        if (!f) { perror("Error writing config"); return; }
-        fprintf(f, "UNIT_NAME=%s\n", name);
-        fprintf(f, "STORAGE_PATH=%s\n", path);
-        fclose(f);
-        printf("Designated storage path set to: %s\n", path);
-        restart_needed = 1;
-    } else {
-        fprintf(stderr, "Error: Unknown flag '%s'. Use --name or --coord.\n", argv[2]);
+        printf("Coordinator set to http://%s:%s\n", argv[3], argv[4]);
+        printf("Please restart daemons to apply.\n");
         return;
     }
 
-    if (restart_needed) {
-        printf("Please restart the daemons for the change to take effect:\n");
-        printf("  sudo ./exodus stop\n");
-        printf("  sudo ./exodus start\n");
+    // --- Handle Unit Config (Shared File: Name & Storage) ---
+    char conf_path[PATH_MAX];
+    snprintf(conf_path, sizeof(conf_path), "%s/exodus-unit.set", exe_dir);
+
+    // 1. Load existing config using ctz-set
+    SetConfig* config = set_load(conf_path);
+    if (!config) {
+        fprintf(stderr, "Error loading configuration.\n");
+        return;
     }
+
+    int save_needed = 0;
+
+    // 2. Process Changes
+    if (strcmp(argv[2], "--name") == 0) {
+        if (argc != 4) { fprintf(stderr, "Usage: --name <name>\n"); set_free(config); return; }
+        
+        const char* current_name = set_get_string(config, "unit", "name", "My-Exodus-Unit");
+        int result = confirm_overwrite("Unit Name", current_name, argv[3]);
+        
+        if (result == 1) {
+            set_set_string(config, "unit", "name", argv[3]);
+            save_needed = 1;
+        } else if (result == -1) {
+            set_free(config);
+            return; // Cancelled
+        }
+
+    } else if (strcmp(argv[2], "--desg") == 0 || strcmp(argv[2], "--desig") == 0) {
+        if (argc != 4) { fprintf(stderr, "Usage: --desg <path>\n"); set_free(config); return; }
+        
+        char resolved_path[PATH_MAX];
+        if (realpath(argv[3], resolved_path) == NULL) {
+            // If path doesn't exist, ask to create it or abort
+            fprintf(stderr, "Warning: Path '%s' does not exist.\n", argv[3]);
+            // Try to use absolute path anyway if user provided absolute
+            if (argv[3][0] == '/') {
+                 strncpy(resolved_path, argv[3], sizeof(resolved_path)-1);
+            } else {
+                 fprintf(stderr, "Error: Please provide a valid, absolute path, or create the directory first.\n");
+                 set_free(config);
+                 return;
+            }
+        }
+
+        const char* current_storage = set_get_string(config, "storage", "path", "");
+        int result = confirm_overwrite("Storage Path", current_storage, resolved_path);
+        
+        if (result == 1) {
+            set_set_string(config, "storage", "path", resolved_path);
+            save_needed = 1;
+        } else if (result == -1) {
+            set_free(config);
+            return; // Cancelled
+        }
+
+    } else {
+        fprintf(stderr, "Unknown flag: %s\n", argv[2]);
+        set_free(config);
+        return;
+    }
+
+    // 3. Safe Write (Only if changed)
+    if (save_needed) {
+        if (set_save(config) == 0) {
+            printf("Configuration updated successfully.\n");
+            printf("Please restart daemons for the change to take effect:\n");
+            printf("  sudo ./exodus stop && sudo ./exodus start\n");
+        } else {
+            perror("Error saving configuration");
+        }
+    }
+
+    set_free(config);
 }
 
 static void run_view_unit(cortez_mesh_t* mesh, pid_t target_pid, const char* unit_name) {

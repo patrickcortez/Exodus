@@ -4,7 +4,7 @@
  * LAN coordinator (via HTTP).
  *
  * COMPILE:
- * gcc -Wall -Wextra -O2 exodus-signal.c cortez-mesh.o ctz-json.a -o exodus-signal -pthread
+ * gcc -Wall -Wextra -O2 exodus-signal.c cortez-mesh.o ctz-json.a ctz-set.o -o exodus-signal -pthread
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -29,6 +29,7 @@
 // Includes cortez-mesh.h
 #include "exodus-common.h" 
 #include "ctz-json.h"
+#include "ctz-set.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -165,37 +166,35 @@ void load_unit_config() {
     char conf_path[PATH_MAX];
     const char* default_name = "My-Exodus-Unit";
 
-    if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) return;
-    snprintf(conf_path, sizeof(conf_path), "%s/exodus-unit.conf", exe_dir);
-
-    FILE* f = fopen(conf_path, "r");
-    if (!f) {
-        f = fopen(conf_path, "w");
-        if (f) {
-            fprintf(f, "UNIT_NAME=%s\n", default_name);
-            fclose(f);
-        }
-        strncpy(g_unit_name, default_name, sizeof(g_unit_name) - 1);
+    if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) {
+        log_msg("Error: Could not determine executable directory.");
         return;
     }
-    
-    char line[1024];
-    int name_found = 0;
-    while (fgets(line, sizeof(line), f)) {
-        line[strcspn(line, "\n")] = 0;
-        if (strncmp(line, "UNIT_NAME=", 10) == 0) {
-            strncpy(g_unit_name, line + 10, sizeof(g_unit_name) - 1);
-            name_found = 1;
-        } else if (strncmp(line, "STORAGE_PATH=", 13) == 0) {
-            strncpy(g_storage_path, line + 13, sizeof(g_storage_path) - 1);
-        }
-    }
-    fclose(f);
+    snprintf(conf_path, sizeof(conf_path), "%s/exodus-unit.set", exe_dir);
 
-    if (!name_found) strncpy(g_unit_name, default_name, sizeof(g_unit_name) - 1);
+    // 1. Load using the robust ctz-set parser
+    SetConfig* cfg = set_load(conf_path);
+    
+    // 2. If file doesn't exist, create it with defaults
+    if (!cfg) {
+        log_msg("Config not found. Creating default at %s", conf_path);
+        cfg = set_create(conf_path);
+        set_set_string(cfg, "unit", "name", default_name);
+        set_save(cfg);
+    }
+
+    // 3. Read values (Safely handles missing keys/sections)
+    const char* name = set_get_string(cfg, "unit", "name", default_name);
+    const char* storage = set_get_string(cfg, "storage", "path", "");
+
+    strncpy(g_unit_name, name, sizeof(g_unit_name) - 1);
+    strncpy(g_storage_path, storage, sizeof(g_storage_path) - 1);
+
+    // 4. Cleanup
+    set_free(cfg);
+
     log_msg("Config loaded: Name='%s', Storage='%s'", g_unit_name, g_storage_path[0] ? g_storage_path : "(none)");
 }
-
 
 
 void send_to_cloud(uint16_t msg_type, const void* payload, uint32_t size) {
