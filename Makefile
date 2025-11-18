@@ -11,6 +11,7 @@ CFLAGS = -Wall -Wextra -O2
 
 SRC_DIR = src
 BIN_DIR = bin
+SRV = server-side
 SHR = shared
 
 #Headers
@@ -42,6 +43,12 @@ TARGETS = \
 	$(BIN_DIR)/exodus-tui \
 	$(BIN_DIR)/node-editor \
 	$(BIN_DIR)/exodus-signal
+
+SERVER = $(SRV)/exodus-coordinator.c
+
+SRV_OUT = s-bin
+
+STARGET = $(SRV_OUT)/exodus-coordinator
 
 # --- Main Rules ---
 
@@ -91,10 +98,26 @@ $(BIN_DIR)/node-editor: $(SRC_DIR)/node-editor.c | $(BIN_DIR)
 $(BIN_DIR)/exodus-signal: $(SRC_DIR)/exodus-signal.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(HDR_COMMON) | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-signal.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(LIBS_PTHREAD) $(INC)
 
+server: $(SRV_OUT)
+	@echo "Compiling $(SERVER)"
+	$(CC) $(CFLAGS) $(SERVER) $(CTZ_JSON_LIB) -o $(STARGET) $(LIBS_PTHREAD) $(INC)
+
+$(SRV_OUT):
+	@echo "Creating $(SRV_OUT)"
+	@mkdir -p $(SRV_OUT)
+
+$(SRV_OUT):
+	@mkdir -p $(SRV_OUT)
+
+
 # --- Cleanup Rule ---
 clean:
 	@echo "Cleaning up $(BIN_DIR)..."
 	@rm -rf $(BIN_DIR)
+
+clean-s:
+	@echo "Cleaning up $(SRV_OUT)"
+	@rm -rf $(SRV_OUT)
 
 # --- Phony Targets ---
 .PHONY: all clean

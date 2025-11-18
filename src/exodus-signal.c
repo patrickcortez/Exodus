@@ -53,6 +53,7 @@ static char g_unit_name[MAX_UNIT_NAME_LEN] = {0};
 // State Caches
 static char* g_local_node_list_json = NULL; // Cache of this unit's nodes
 static pthread_mutex_t g_node_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char g_storage_path[PATH_MAX] = {0};
 
 // Request Queue (from mesh to coordinator)
 typedef struct RequestNode {
@@ -164,37 +165,35 @@ void load_unit_config() {
     char conf_path[PATH_MAX];
     const char* default_name = "My-Exodus-Unit";
 
-    if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) {
-        log_msg("Error: Could not find executable dir. Using default unit name.");
-        strncpy(g_unit_name, default_name, sizeof(g_unit_name) - 1);
-        return;
-    }
-    
+    if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) return;
     snprintf(conf_path, sizeof(conf_path), "%s/exodus-unit.conf", exe_dir);
+
     FILE* f = fopen(conf_path, "r");
     if (!f) {
-        log_msg("Warning: '%s' not found. Creating default.", conf_path);
         f = fopen(conf_path, "w");
         if (f) {
-            fprintf(f, "%s\n", default_name);
+            fprintf(f, "UNIT_NAME=%s\n", default_name);
             fclose(f);
         }
         strncpy(g_unit_name, default_name, sizeof(g_unit_name) - 1);
         return;
     }
     
-    if (fgets(g_unit_name, sizeof(g_unit_name), f)) {
-        g_unit_name[strcspn(g_unit_name, "\n")] = 0; // Remove newline
-    } else {
-        strncpy(g_unit_name, default_name, sizeof(g_unit_name) - 1); // Fallback
+    char line[1024];
+    int name_found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = 0;
+        if (strncmp(line, "UNIT_NAME=", 10) == 0) {
+            strncpy(g_unit_name, line + 10, sizeof(g_unit_name) - 1);
+            name_found = 1;
+        } else if (strncmp(line, "STORAGE_PATH=", 13) == 0) {
+            strncpy(g_storage_path, line + 13, sizeof(g_storage_path) - 1);
+        }
     }
     fclose(f);
-    
-    if (strlen(g_unit_name) == 0) { // Handle empty file
-         strncpy(g_unit_name, default_name, sizeof(g_unit_name) - 1);
-    }
-    
-    log_msg("Unit name loaded: %s", g_unit_name);
+
+    if (!name_found) strncpy(g_unit_name, default_name, sizeof(g_unit_name) - 1);
+    log_msg("Config loaded: Name='%s', Storage='%s'", g_unit_name, g_storage_path[0] ? g_storage_path : "(none)");
 }
 
 
@@ -371,6 +370,26 @@ void* mesh_listener_thread(void* arg) {
             
             pthread_mutex_unlock(&g_node_cache_mutex);
 
+        } else if (msg_type == MSG_SIG_REQUEST_RESOLVE_UNIT) {
+            RequestNode* new_req = malloc(sizeof(RequestNode));
+            if (new_req) {
+                new_req->type = msg_type;
+                new_req->payload = malloc(payload_size);
+                memcpy(new_req->payload, payload, payload_size);
+                new_req->payload_size = payload_size;
+                new_req->next = NULL;
+                
+                pthread_mutex_lock(&g_request_queue_mutex);
+                if (g_request_queue_head == NULL) {
+                    g_request_queue_head = new_req;
+                } else {
+                    RequestNode* temp = g_request_queue_head;
+                    while(temp->next) temp = temp->next;
+                    temp->next = new_req;
+                }
+                pthread_mutex_unlock(&g_request_queue_mutex);
+                pthread_cond_signal(&g_request_queue_cond);
+            }
         }
         else if (msg_type == MSG_TERMINATE) {
             log_msg("Received TERMINATE from cloud daemon.");
@@ -509,6 +528,49 @@ void* coordinator_client_thread(void* arg) {
                         g_coord_host, g_coord_port, strlen(json_payload), json_payload
                     );
                     http_ok = send_http_request(g_coord_host, g_coord_port, http_req_buf, http_resp_buf, sizeof(http_resp_buf));
+                }else if (req_to_process->type == MSG_SIG_REQUEST_RESOLVE_UNIT) {
+                    resolve_unit_req_t* req = (resolve_unit_req_t*)inner_payload;
+                    
+                    // URL encode spaces as + for simplicity
+                    char encoded_name[256];
+                    strncpy(encoded_name, req->target_unit_name, sizeof(encoded_name)-1);
+                    for(int i=0; encoded_name[i]; i++) if(encoded_name[i] == ' ') encoded_name[i] = '+';
+
+                    snprintf(http_req_buf, sizeof(http_req_buf),
+                        "GET /resolve?unit=%s HTTP/1.1\r\n"
+                        "Host: %s:%d\r\n"
+                        "Connection: close\r\n\r\n",
+                        encoded_name, g_coord_host, g_coord_port
+                    );
+                    
+                    http_ok = send_http_request(g_coord_host, g_coord_port, http_req_buf, http_resp_buf, sizeof(http_resp_buf));
+                    
+                    resolve_unit_resp_t resp = {0};
+                    if (http_ok == 0) {
+                        char* body = strstr(http_resp_buf, "\r\n\r\n");
+                        if (body) {
+                            body += 4;
+                            ctz_json_value* root = ctz_json_parse(body, NULL, 0);
+                            if (root) {
+                                const char* ip = ctz_json_get_string(ctz_json_find_object_value(root, "ip"));
+                                int port = (int)ctz_json_get_number(ctz_json_find_object_value(root, "port"));
+                                if (ip && port > 0) {
+                                    resp.success = 1;
+                                    strncpy(resp.ip_addr, ip, sizeof(resp.ip_addr) - 1);
+                                    resp.port = port;
+                                }
+                                ctz_json_free(root);
+                            }
+                        }
+                    }
+                    
+                    size_t wrapped_size = sizeof(uint64_t) + sizeof(resolve_unit_resp_t);
+                    char* wrapped_resp = malloc(wrapped_size);
+                    memcpy(wrapped_resp, &request_id, sizeof(uint64_t));
+                    memcpy(wrapped_resp + sizeof(uint64_t), &resp, sizeof(resolve_unit_resp_t));
+                    
+                    send_to_cloud(MSG_SIG_RESPONSE_RESOLVE_UNIT, wrapped_resp, wrapped_size);
+                    free(wrapped_resp);
                 }
 
                 if (http_ok == 0) {
@@ -695,6 +757,85 @@ void* handle_coordinator_request(void* arg) {
                               "Connection: close\r\n\r\n{\"status\":\"ok\"}";
         write(sock_fd, ok_resp, strlen(ok_resp));
         
+    } else if (strcmp(method, "POST") == 0 && strcmp(path, "/push_incoming") == 0) {
+        
+        if (g_storage_path[0] == '\0') {
+             const char* err = "HTTP/1.1 500 Server Error\r\n\r\nNo Designated Storage Path Set.";
+             write(sock_fd, err, strlen(err));
+             close(sock_fd); free(buffer); return NULL;
+        }
+
+        // 1. Extract Node Name from Headers
+        char* node_name_line = strstr(buffer, "X-Node-Name:");
+        if (!node_name_line) {
+             const char* err = "HTTP/1.1 400 Bad Request\r\n\r\nMissing X-Node-Name header.";
+             write(sock_fd, err, strlen(err));
+             close(sock_fd); free(buffer); return NULL;
+        }
+        char* node_name_start = node_name_line + 12;
+        while(*node_name_start == ' ') node_name_start++;
+        char* node_name_end = strstr(node_name_start, "\r\n");
+        char node_name[MAX_NODE_NAME_LEN] = {0};
+        if (node_name_end) strncpy(node_name, node_name_start, node_name_end - node_name_start);
+        
+        log_msg("Receiving Push: Node '%s' into designated path '%s'", node_name, g_storage_path);
+
+        // 2. Prepare Filesystem
+        char target_dir[PATH_MAX];
+        snprintf(target_dir, sizeof(target_dir), "%s/%s", g_storage_path, node_name);
+        mkdir(g_storage_path, 0755);
+        mkdir(target_dir, 0755);
+
+        char temp_archive[PATH_MAX];
+        snprintf(temp_archive, sizeof(temp_archive), "%s/%s.tar", g_storage_path, node_name);
+
+        // 3. Stream Data to Disk
+        FILE* f_tmp = fopen(temp_archive, "wb");
+        if (!f_tmp) {
+             const char* err = "HTTP/1.1 500 Server Error\r\n\r\nDisk Write Failed.";
+             write(sock_fd, err, strlen(err));
+             close(sock_fd); free(buffer); return NULL;
+        }
+
+        // Write what we already read into the buffer
+        char* body_ptr = body; // 'body' pointer calculated earlier in function
+        ssize_t initial_bytes = n - (body_ptr - buffer);
+        if (initial_bytes > 0) fwrite(body_ptr, 1, initial_bytes, f_tmp);
+
+        // Pump the rest from socket
+        char stream_buf[65536];
+        ssize_t r;
+        size_t total_received = initial_bytes;
+        
+        // Set a receive timeout just in case
+        struct timeval tv; tv.tv_sec = 30; tv.tv_usec = 0;
+        setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+
+        while ((r = read(sock_fd, stream_buf, sizeof(stream_buf))) > 0) {
+            fwrite(stream_buf, 1, r, f_tmp);
+            total_received += r;
+        }
+        fclose(f_tmp);
+        
+        log_msg("Push received (%zu bytes). Unpacking...", total_received);
+
+        // 4. Unpack
+        char cmd[PATH_MAX * 3];
+        // Fast tar extraction
+        snprintf(cmd, sizeof(cmd), "tar -xf \"%s\" -C \"%s\"", temp_archive, target_dir);
+        int unpack_ret = system(cmd);
+        
+        remove(temp_archive); // Cleanup temp file
+
+        if (unpack_ret == 0) {
+            const char* done = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nPush Successful.";
+            write(sock_fd, done, strlen(done));
+            log_msg("Node '%s' successfully pushed and unpacked.", node_name);
+        } else {
+            const char* err = "HTTP/1.1 500 Server Error\r\n\r\nUnpack Failed.";
+            write(sock_fd, err, strlen(err));
+            log_msg("Error unpacking node '%s'.", node_name);
+        }
     } else {
         const char* not_found_resp = "HTTP/1.1 404 Not Found\r\n"
                                      "Content-Type: text/plain\r\n"

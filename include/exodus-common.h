@@ -85,6 +85,9 @@ enum exodus_msg_types {
     // Signal -> Cloud (Incoming data from other Units)
     MSG_SIG_SYNC_DATA = MESH_MSG_USER_START + 47, // Payload: sig_sync_data_t
 
+    MSG_SIG_REQUEST_RESOLVE_UNIT,
+    MSG_SIG_RESPONSE_RESOLVE_UNIT,
+
     MSG_SIG_REQUEST_VIEW_CACHE,  // (CLI -> Cloud -> Signal) Request to see signal's local node cache
     MSG_SIG_RESPONSE_VIEW_CACHE,
 
@@ -258,5 +261,14 @@ typedef struct {
     char sync_payload_json[0];
 } sig_sync_data_t;
 
+typedef struct {
+    char target_unit_name[MAX_UNIT_NAME_LEN];
+} resolve_unit_req_t;
+
+typedef struct {
+    int success;
+    char ip_addr[64];
+    int port;
+} resolve_unit_resp_t;
 
 #endif // EXODUS_COMMON_H

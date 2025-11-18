@@ -115,7 +115,8 @@ int main() {
         if ((msg_type >= MSG_UPLOAD_FILE && msg_type <= MSG_COMMIT_NODE) || 
             (msg_type >= MSG_NODE_MAN_CREATE && msg_type <= MSG_NODE_MAN_COPY) ||
             (msg_type >= MSG_SIG_REQUEST_UNIT_LIST && msg_type <= MSG_SIG_REQUEST_SYNC_NODE) ||
-             msg_type == MSG_SIG_REQUEST_VIEW_CACHE) {
+             msg_type == MSG_SIG_REQUEST_VIEW_CACHE || 
+             msg_type == MSG_SIG_REQUEST_RESOLVE_UNIT){
             printf("[Query] Received request (type %d) from client %d. Forwarding to cloud daemon.\n", msg_type, sender_pid);
 
             PendingRequest* new_req = malloc(sizeof(PendingRequest));

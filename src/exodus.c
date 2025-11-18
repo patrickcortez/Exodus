@@ -1932,6 +1932,34 @@ static void run_unit_set(int argc, char* argv[]) {
         printf("Successfully set coordinator URL to: %s\n", url_buffer);
         restart_needed = 1;
 
+    } else if (strcmp(argv[2], "--desg") == 0) {
+        if (argc != 4) {
+            fprintf(stderr, "Usage: exodus unit-set --desg <absolute_path>\n");
+            return;
+        }
+        char* path = argv[3];
+        char name[128] = "My-Exodus-Unit";
+        
+        // Preserve existing name
+        snprintf(conf_path, sizeof(conf_path), "%s/exodus-unit.conf", exe_dir);
+        FILE* f = fopen(conf_path, "r");
+        if (f) {
+            char line[1024];
+            while(fgets(line, sizeof(line), f)) {
+                line[strcspn(line, "\n")] = 0;
+                if (strncmp(line, "UNIT_NAME=", 10) == 0) strncpy(name, line+10, 127);
+            }
+            fclose(f);
+        }
+        
+        // Write new config
+        f = fopen(conf_path, "w");
+        if (!f) { perror("Error writing config"); return; }
+        fprintf(f, "UNIT_NAME=%s\n", name);
+        fprintf(f, "STORAGE_PATH=%s\n", path);
+        fclose(f);
+        printf("Designated storage path set to: %s\n", path);
+        restart_needed = 1;
     } else {
         fprintf(stderr, "Error: Unknown flag '%s'. Use --name or --coord.\n", argv[2]);
         return;
@@ -1998,6 +2026,127 @@ static void run_view_unit(cortez_mesh_t* mesh, pid_t target_pid, const char* uni
     } else {
         printf("No response from daemon (timeout).\n");
     }
+}
+
+static void run_push_node(cortez_mesh_t* mesh, pid_t target_pid, const char* node_name, const char* target_unit) {
+    // 1. Resolve Target IP
+    printf("Resolving address for unit '%s'...\n", target_unit);
+    
+    resolve_unit_req_t req;
+    strncpy(req.target_unit_name, target_unit, sizeof(req.target_unit_name) - 1);
+    
+    int sent_ok = 0;
+    for(int i=0; i<5; i++) {
+        cortez_write_handle_t* h = cortez_mesh_begin_send_zc(mesh, target_pid, sizeof(req));
+        if(h) {
+            size_t part1_size;
+            void* buffer = cortez_write_handle_get_part1(h, &part1_size);
+            memcpy(buffer, &req, sizeof(req));
+            cortez_mesh_commit_send_zc(h, MSG_SIG_REQUEST_RESOLVE_UNIT);
+            sent_ok = 1; break;
+        }
+        usleep(100000);
+    }
+    
+    if(!sent_ok) { fprintf(stderr, "Failed to contact daemon.\n"); return; }
+
+    char target_ip[64] = {0};
+    int target_port = 0;
+    
+    printf("Waiting for resolution...\n");
+    cortez_msg_t* msg = cortez_mesh_read(mesh, 5000); // 5s timeout
+    if(msg) {
+        if (cortez_msg_type(msg) == MSG_SIG_RESPONSE_RESOLVE_UNIT) {
+            const resolve_unit_resp_t* resp = (const resolve_unit_resp_t*)cortez_msg_payload(msg);
+            if(resp->success) {
+                strncpy(target_ip, resp->ip_addr, 63);
+                target_port = resp->port;
+            }
+        }
+        cortez_mesh_msg_release(mesh, msg);
+    }
+
+    if(target_port == 0) {
+        fprintf(stderr, "Error: Unit '%s' not found or offline.\n", target_unit);
+        return;
+    }
+
+    // 2. Find Local Node Path
+    char node_path[PATH_MAX];
+    if (find_node_path_in_config(node_name, node_path, sizeof(node_path)) != 0) return;
+
+    printf("Pushing node '%s' to %s:%d...\n", node_name, target_ip, target_port);
+
+    // 3. Create Temporary Archive (TAR)
+    // Using tar is fast and preserves structure
+    char tmp_file[64];
+    snprintf(tmp_file, sizeof(tmp_file), "/tmp/exodus_push_%d.tar", getpid());
+    char cmd[PATH_MAX*2];
+    // Create tar of the node directory
+    snprintf(cmd, sizeof(cmd), "tar -cf \"%s\" -C \"%s\" .", tmp_file, node_path);
+    if (system(cmd) != 0) {
+        fprintf(stderr, "Error: Failed to pack node data.\n");
+        return;
+    }
+
+    // 4. Upload Archive
+    struct sockaddr_in serv_addr;
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if(sock < 0) { perror("Socket creation failed"); remove(tmp_file); return; }
+    
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(target_port);
+    if(inet_pton(AF_INET, target_ip, &serv_addr.sin_addr)<=0) { perror("Invalid address"); remove(tmp_file); return; }
+    
+    if(connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
+        perror("Connection failed"); remove(tmp_file); return;
+    }
+
+    // Calculate file size
+    FILE* f = fopen(tmp_file, "rb");
+    if(!f) { perror("Failed to open temp archive"); close(sock); remove(tmp_file); return; }
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    // Send Headers
+    char header[1024];
+    snprintf(header, sizeof(header), 
+        "POST /push_incoming HTTP/1.1\r\n"
+        "Host: %s:%d\r\n"
+        "X-Node-Name: %s\r\n"
+        "Content-Length: %ld\r\n"
+        "Connection: close\r\n\r\n",
+        target_ip, target_port, node_name, file_size);
+    write(sock, header, strlen(header));
+
+    // Send File Data
+    char buf[65536]; // 64KB buffer for speed
+    size_t n;
+    size_t total_sent = 0;
+    while((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        write(sock, buf, n);
+        total_sent += n;
+        // Optional: Print progress bar here
+    }
+    fclose(f);
+    remove(tmp_file);
+
+    // Read Response
+    char resp[1024];
+    ssize_t rn = read(sock, resp, sizeof(resp)-1);
+    if (rn > 0) {
+        resp[rn] = '\0';
+        if (strstr(resp, "200 OK")) {
+            printf("Push successful! Node delivered to designated storage.\n");
+        } else {
+            printf("Server reported error:\n%s\n", resp);
+        }
+    } else {
+        printf("No response from server (connection closed).\n");
+    }
+    
+    close(sock);
 }
 
 static void run_sync_node(cortez_mesh_t* mesh, pid_t target_pid, 
@@ -2678,6 +2827,7 @@ static void print_detailed_usage(void) {
     fprintf(stderr, "  %-12s Sync history with a remote node (e.g., sync <unit> <remote-node> <local-node>)\n", "sync");
     fprintf(stderr, "  %-12s Set this machine's name or coordinator (--name, --coord)\n", "unit-set");
     fprintf(stderr, "  %-12s -For Debugging- View the signal daemon's local node cache\n", "view-cache");
+    fprintf(stderr, "  %-12s Push a node's full data to a remote unit's designated storage\n", "push");
     fprintf(stderr, "\n");
 }
 
@@ -3450,6 +3600,28 @@ int main(int argc, char* argv[]) {
         } else {
             fprintf(stderr, "Failed to send message to query daemon after 5 attempts.\n");
         }
+        cortez_mesh_shutdown(mesh);
+    }else if (strcmp(argv[1], "push") == 0) {
+
+        if (argc != 4) {
+            fprintf(stderr, "Usage: exodus push <node_name> <target_unit>\n");
+            return 1;
+        }
+
+        cortez_mesh_t* mesh = cortez_mesh_init("exodus_client", NULL);
+
+        if (!mesh) return 1;
+        pid_t target_pid = find_query_daemon_pid();
+
+        if (target_pid > 0) {
+
+            run_push_node(mesh, target_pid, argv[2], argv[3]);
+
+        } else {
+
+            fprintf(stderr, "Daemon not running.\n");
+        }
+
         cortez_mesh_shutdown(mesh);
     } else {
         cortez_mesh_t* mesh = cortez_mesh_init("exodus_client", NULL);

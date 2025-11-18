@@ -1,6 +1,6 @@
 # Exodus
 
-**Exodus** is a Real Time Multi Daemon File System Monitoring & Version Control (C/Linux) that
+**Exodus** is a Real Time Multi Daemon File System Monitoring that uses Linux's **Inotify** & Version Control (C/Linux) that
 handles large files, all made in C. It has its own TUI for Editing Text Files,IPC and Daemon Management tool.
 
 ---
@@ -154,7 +154,7 @@ exodus commit node-name 1.0
 
 - Node: A directory on your filesystem that Exodus is tracking (e.g., /home/user/projects/my-site). This is the root of a versioned project.
 
-- Unit: A Device/Machine that has Exodus.
+- Unit: A Device/Machine that has Exodus, You can View, push or clone any Units Nodes.
 
 - Coordinator: An Exodus Server for Synchronizing and Managing Units Across a Network.
 

@@ -2378,6 +2378,7 @@ int main() {
                 case MSG_SIG_RESPONSE_UNIT_LIST:
                 case MSG_SIG_RESPONSE_VIEW_UNIT:
                 case MSG_SIG_RESPONSE_VIEW_CACHE:
+                case MSG_SIG_RESPONSE_RESOLVE_UNIT:
                 case MSG_OPERATION_ACK:
                 {
                     printf("[Cloud] Received response from signal, forwarding to query daemon.\n");
