@@ -1933,7 +1933,7 @@ static void run_unit_set(int argc, char* argv[]) {
         printf("Successfully set coordinator URL to: %s\n", url_buffer);
         restart_needed = 1;
 
-    } else if (strcmp(argv[2], "--desg") == 0) {
+    } else if (strcmp(argv[2], "--desig") == 0) {
         if (argc != 4) {
             fprintf(stderr, "Usage: exodus unit-set --desg <absolute_path>\n");
             return;
