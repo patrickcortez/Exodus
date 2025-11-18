@@ -1,53 +1,59 @@
 # Exodus
-Exodus is a Real Time Multi Daemon File System Monitoring & Version Control (C/Linux) that
+
+**Exodus** is a Real Time Multi Daemon File System Monitoring & Version Control (C/Linux) that
 handles large files, all made in C. It has its own TUI for Editing Text Files,IPC and Daemon Management tool.
 
-[Set Up]
+---
+
+## Installation
+
 To set up exodus, you must first, make sure the installers have the proper permissions:
 
-chmod +x install, chmod +X install-k, chmod +x install-dependencies, and last: chmod +x uninstall
+### 1. Make Installer and Uninstaller scripts executable
+``` bash
 
-Exodus has minimal Dependencies, make sure to run:
+chmod +x install
+chmod +x install-k
+chmod +x install-dependencies
+chmod +x uninstall
+
+```
+
+### 2. Install Dependencies
+
+``` bash
 
 sudo ./install-dependencies.sh
 
-to check if the dependencies are all installed in your system. Then after checking for dependencies
-make sure to compile the kernel modules, because the kernel module is a very important component that allows the mesh ipc to properly
-function and makes the communication between daemons possible:
+```
 
-- cd k-module
-- make
-- cd ..
+### 3. Compile Kernel Module
 
-then after they compile you can then cd out.
+``` bash
 
-Then Run the makefile in terminal with:
+#This Kernel Module is important for the daemons to communicate in the mesh ipc.
 
--make
+cd k-module
+make
+cd ..
 
-then watch it compile, after compiling, run the installer with:
+```
+
+### 4. Compiling Binaries
+
+``` bash
+
+make
 
 sudo ./install
 
-but make sure you make it executable fist:
-
-chmod +x install
-
-and do the same with the kernel module installer:
-
-chmod +x install
-
-after the installation is done, run the kernel module installer:
-
 sudo ./install-k
-
-this will install the kernel module which is needed for the mesh ipc to start.
-
-this will install exodus and right after, you can start exodus with:
 
 exodus start
 
-[Exodus Commands]
+```
+
+## Commands
 
 [Daemon & Service Management]
 
@@ -116,7 +122,7 @@ exodus start
   - view-cache    For debugging, views the local node list of the signal daemon, to make sure it's upto date.
 
 
-[Concepts and Definitions]
+## Concepts and Definitions
 
 - Node: A directory on your filesystem that Exodus is tracking (e.g., /home/user/projects/my-site). This is the root of a versioned project.
 
@@ -126,9 +132,9 @@ exodus start
 
 - Daemon: A background process that runs the Exodus system.
 
-- cloud_daemon: The central orchestration daemon. It manages all nodes, handles versioning, and performs file system monitoring.
+- Cloud_daemon: The central orchestration daemon. It manages all nodes, handles versioning, and performs file system monitoring.
 
-- query_daemon: The public-facing daemon that accepts commands from the exodus client and forwards them to the cloud_daemon.
+- Query_daemon: The public-facing daemon that accepts commands from the exodus client and forwards them to the cloud_daemon.
 
 - Guardian (exodus-node-guardian): A special, lightweight, standalone daemon dedicated to a single node. It's used when a node is set to --auto 1, allowing it to be monitored on system startup without the main cloud_daemon running.
 
@@ -157,6 +163,7 @@ exodus start
 - enode File: A Encrypted File that can be sent to other exodus users.
 
 
-Developer: Patrick Andrew Cortez
+## Developer: 
+### Patrick Andrew Cortez
 
 
