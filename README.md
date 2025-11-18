@@ -1,5 +1,4 @@
 # Exodus
-
 Exodus is a Real Time Multi Daemon File System Monitoring & Version Control (C/Linux) that
 handles large files, all made in C. It has its own TUI for Editing Text Files,IPC and Daemon Management tool.
 
