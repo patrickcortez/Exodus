@@ -13,8 +13,11 @@ To set up exodus, you must first, make sure the installers have the proper permi
 ``` bash
 
 chmod +x install
+
 chmod +x install-k
+
 chmod +x install-dependencies
+
 chmod +x uninstall
 
 ```
@@ -34,7 +37,9 @@ sudo ./install-dependencies.sh
 #This Kernel Module is important for the daemons to communicate in the mesh ipc.
 
 cd k-module
+
 make
+
 cd ..
 
 ```
@@ -49,9 +54,17 @@ sudo ./install
 
 sudo ./install-k
 
+```
+
+### 5. Starting Exodus
+
+``` bash
+
 exodus start
 
 ```
+
+---
 
 ## Commands
 
@@ -121,6 +134,7 @@ exodus start
   - unit-set:     Set this machine's name or coordinator (--name, --coord)
   - view-cache    For debugging, views the local node list of the signal daemon, to make sure it's upto date.
 
+---
 
 ## Concepts and Definitions
 
@@ -162,8 +176,10 @@ exodus start
 
 - enode File: A Encrypted File that can be sent to other exodus users.
 
+---
 
 ## Developer: 
+
 ### Patrick Andrew Cortez
 
 
