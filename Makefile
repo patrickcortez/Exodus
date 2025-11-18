@@ -71,7 +71,7 @@ $(BIN_DIR)/exctl: $(SRC_DIR)/exctl.c $(CTZ_JSON_LIB) $(HDR_COMMON) | $(BIN_DIR)
 
 # 2. exodus
 $(BIN_DIR)/exodus: $(SRC_DIR)/exodus.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(CORTEZ_IPC_OBJ) $(CTZ_SET) $(HDR_COMMON) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(CORTEZ_IPC_OBJ) $(LIBS_PTHREAD) $(INC)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(CORTEZ_IPC_OBJ) $(CTZ_SET) $(LIBS_PTHREAD) $(INC)
 
 # 3. exodus_snapshot (from exodus-anchor-weaver.c)
 $(BIN_DIR)/exodus_snapshot: $(SRC_DIR)/exodus-anchor-weaver.c $(CORTEZ_IPC_OBJ) $(CTZ_JSON_LIB) | $(BIN_DIR)
@@ -98,7 +98,7 @@ $(BIN_DIR)/node-editor: $(SRC_DIR)/node-editor.c | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/node-editor.c $(LIBS_NCURSES) $(INC)
 
 $(BIN_DIR)/exodus-signal: $(SRC_DIR)/exodus-signal.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(CTZ_SET) $(HDR_COMMON) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-signal.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(LIBS_PTHREAD) $(INC)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-signal.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(CTZ_SET) $(LIBS_PTHREAD) $(INC)
 
 server: $(SRV_OUT)
 	@echo "Compiling $(SERVER)"
