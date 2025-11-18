@@ -3197,6 +3197,8 @@ case MSG_REMOVE_NODE: {
                 case MSG_SIG_REQUEST_VIEW_UNIT:
                 case MSG_SIG_REQUEST_SYNC_NODE:
                 case MSG_SIG_REQUEST_VIEW_CACHE:
+                case MSG_SIG_REQUEST_RESOLVE_UNIT:
+                case MSG_SIG_RELOAD_CONFIG:
                 {
                     if (g_signal_daemon_pid == 0) {
                         ack.success = 0;
