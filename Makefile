@@ -2,19 +2,26 @@
 
 # --- Compiler and Flags ---
 CC = gcc
+
 # Common flags from your source files: -Wall -Wextra -O2
+
 CFLAGS = -Wall -Wextra -O2
 
-# --- Directories ---
+#Directories
+
 SRC_DIR = src
 BIN_DIR = bin
+SHR = shared
 
-# --- External Dependencies ---
-# These files were NOT provided, so we assume they exist in the project root.
-# You may need to update these paths or add rules to build them.
-CORTEZ_IPC_OBJ  = cortez_ipc.o
-CORTEZ_MESH_OBJ = cortez-mesh.o
-CTZ_JSON_LIB    = ctz-json.a
+#Headers
+
+INC = -Iinclude
+
+#External Dependencies
+
+CORTEZ_IPC_OBJ  = $(SHR)/cortez_ipc.o
+CORTEZ_MESH_OBJ = $(SHR)/cortez-mesh.o
+CTZ_JSON_LIB    = $(SHR)/ctz-json.a
 
 # --- Libraries ---
 LIBS_PTHREAD = -pthread
@@ -51,38 +58,38 @@ $(BIN_DIR):
 
 # 1. exctl
 $(BIN_DIR)/exctl: $(SRC_DIR)/exctl.c $(CTZ_JSON_LIB) $(HDR_COMMON) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exctl.c $(CTZ_JSON_LIB)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exctl.c $(CTZ_JSON_LIB) $(INC)
 
 # 2. exodus
 $(BIN_DIR)/exodus: $(SRC_DIR)/exodus.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(CORTEZ_IPC_OBJ) $(HDR_COMMON) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(CORTEZ_IPC_OBJ) $(LIBS_PTHREAD)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(CORTEZ_IPC_OBJ) $(LIBS_PTHREAD) $(INC)
 
 # 3. exodus_snapshot (from exodus-anchor-weaver.c)
 $(BIN_DIR)/exodus_snapshot: $(SRC_DIR)/exodus-anchor-weaver.c $(CORTEZ_IPC_OBJ) $(CTZ_JSON_LIB) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-anchor-weaver.c $(CORTEZ_IPC_OBJ) $(CTZ_JSON_LIB) $(LIBS_MATH_ZLIB)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-anchor-weaver.c $(CORTEZ_IPC_OBJ) $(CTZ_JSON_LIB) $(LIBS_MATH_ZLIB) $(INC)
 
 # 4. cloud_daemon (from exodus-cloud-daemon.c)
 $(BIN_DIR)/cloud_daemon: $(SRC_DIR)/exodus-cloud-daemon.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(HDR_COMMON) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-cloud-daemon.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(LIBS_PTHREAD)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-cloud-daemon.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(LIBS_PTHREAD) $(INC)
 
 # 5. exodus-node-guardian
 $(BIN_DIR)/exodus-node-guardian: $(SRC_DIR)/exodus-node-guardian.c $(CTZ_JSON_LIB) $(HDR_COMMON) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-node-guardian.c $(CTZ_JSON_LIB) $(LIBS_PTHREAD)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-node-guardian.c $(CTZ_JSON_LIB) $(LIBS_PTHREAD) $(INC)
 
 # 6. query_daemon (from exodus-query-daemon.c)
 $(BIN_DIR)/query_daemon: $(SRC_DIR)/exodus-query-daemon.c $(CORTEZ_MESH_OBJ) $(HDR_COMMON) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-query-daemon.c $(CORTEZ_MESH_OBJ) $(LIBS_PTHREAD)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-query-daemon.c $(CORTEZ_MESH_OBJ) $(LIBS_PTHREAD) $(INC)
 
 # 7. exodus-tui
 $(BIN_DIR)/exodus-tui: $(SRC_DIR)/exodus-tui.c $(CTZ_JSON_LIB) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-tui.c $(CTZ_JSON_LIB) $(LIBS_NCURSES)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-tui.c $(CTZ_JSON_LIB) $(LIBS_NCURSES) $(INC)
 
 # 8. node-editor
 $(BIN_DIR)/node-editor: $(SRC_DIR)/node-editor.c | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/node-editor.c $(LIBS_NCURSES)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/node-editor.c $(LIBS_NCURSES) $(INC)
 
 $(BIN_DIR)/exodus-signal: $(SRC_DIR)/exodus-signal.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(HDR_COMMON) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-signal.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(LIBS_PTHREAD)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-signal.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(LIBS_PTHREAD) $(INC)
 
 # --- Cleanup Rule ---
 clean:

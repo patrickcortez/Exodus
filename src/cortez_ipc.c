@@ -1,5 +1,5 @@
 /* tools-src/cortez_ipc.c
- * gcc -Wall -c cortez_ipc.c -o cortez_ipc.o -I../include
+ * gcc -Wall -c cortez_ipc.c -o cortez_ipc.o -Iinclude
  */
 
 #include "cortez_ipc.h"

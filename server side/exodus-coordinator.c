@@ -97,13 +97,31 @@ int send_http_request(const char* host, int port, const char* request, char* res
         return -1;
     }
 
-    ssize_t n = read(sock_fd, response_buf, response_size - 1);
-    if (n >= 0) {
-        response_buf[n] = '\0';
-    } else {
-        log_msg("HTTP Client Error: Failed to read response");
-        close(sock_fd);
-        return -1;
+    size_t total_read = 0;
+    ssize_t n;
+    while (total_read < response_size - 1) {
+        // Read into the buffer *after* the data we already have
+        n = read(sock_fd, response_buf + total_read, (response_size - 1) - total_read);
+        
+        if (n < 0) {
+            // A real read error
+            log_msg("HTTP Client Error: Failed to read response: %s", strerror(errno));
+            close(sock_fd);
+            return -1;
+        }
+        
+        if (n == 0) {
+            // End of file (connection closed by server), this is the normal exit
+            break;
+        }
+        
+        total_read += n;
+    }
+    
+    response_buf[total_read] = '\0'; // Null-terminate the full response
+    
+    if (total_read == response_size - 1) {
+         log_msg("HTTP Client Warning: Response buffer may be full. Response might be truncated.");
     }
 
     close(sock_fd);
@@ -210,21 +228,29 @@ void* handle_connection(void* arg) {
     
     // --- Parse Request ---
     char* saveptr_line;
-    char* first_line = strtok_r(buffer, "\r\n", &saveptr_line);
-    if (!first_line) {
+    char* method_path_line;
+    char* body = strstr(buffer, "\r\n\r\n");
+
+    if (body) {
+        *body = '\0';
+        body += 4;    
+    }
+    
+    method_path_line = strtok_r(buffer, "\r\n", &saveptr_line);
+    if (!method_path_line) {
         close(sock_fd);
+        free(buffer);
         return NULL;
     }
 
-    char* method = strtok(first_line, " ");
-    char* path = strtok(NULL, " ");
+    char* saveptr_method;
+    char* method = strtok_r(method_path_line, " ", &saveptr_method);
+    char* path = strtok_r(NULL, " ", &saveptr_method);
     if (!method || !path) {
         close(sock_fd);
+        free(buffer);
         return NULL;
     }
-
-    char* body = strstr(buffer, "\r\n\r\n");
-    if (body) body += 4;
     
     // --- Route: POST /register ---
     if (strcmp(method, "POST") == 0 && strcmp(path, "/register") == 0) {
@@ -273,8 +299,8 @@ void* handle_connection(void* arg) {
         ctz_json_free(root);
     
     // --- Route: GET /nodes?target_unit=... ---
-    } else if (strcmp(method, "GET") == 0 && strncmp(path, "/nodes?target_unit=", 20) == 0) {
-        const char* target_name = path + 20;
+    } else if (strcmp(method, "GET") == 0 && strncmp(path, "/nodes?target_unit=", 19) == 0) {
+        const char* target_name = path + 19;
         char target_ip[64];
         int target_port;
         
