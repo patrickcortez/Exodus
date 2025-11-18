@@ -56,11 +56,25 @@ sudo ./install-k
 
 ```
 
-### 5. Starting Exodus
+### 5. Quick Start
 
 ``` bash
 
+# To start exodus
+
 exodus start
+
+# Add a Directory as a node
+
+exodus add-node /home/user/nodename node-name
+
+# View events of the node, You just added
+
+exodus history node-name
+
+# commit the changes of a node
+
+exodus commit node-name 1.0
 
 ```
 
