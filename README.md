@@ -106,9 +106,10 @@ exodus start
 
 [Unit and Network Utility/Management]
   - unit-list:    List all connected Units on the network
-  - view-unit:    List all nodes on a specific remote Unit
+  - view-unit :    List all nodes on a specific remote Unit
   - sync:         Sync history with a remote node (e.g., sync <unit> <remote-node> <local-node>)
   - unit-set:     Set this machine's name or coordinator (--name, --coord)
+  - view-cache    For debugging, views the local node list of the signal daemon, to make sure it's upto date.
 
 
 [Concepts and Definitions]
