@@ -22,6 +22,7 @@
 #include "exodus-common.h"
 #include "ctz-json.h"
 #include "cortez_ipc.h"
+#include "ctz-set.h"
 #include <libgen.h>
 
 
@@ -1862,6 +1863,54 @@ static void run_unit_list(cortez_mesh_t* mesh, pid_t target_pid) {
     }
 }
 
+static void run_connect(int argc, char* argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "Usage: exodus connect <coord-name>\n");
+        return;
+    }
+    char* target_name = argv[2];
+    char exe_dir[PATH_MAX];
+    if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) return;
+
+    char conf_path[PATH_MAX];
+    snprintf(conf_path, sizeof(conf_path), "%s/exodus-coord.set", exe_dir);
+
+    SetConfig* cfg = set_load(conf_path);
+    if (!cfg) {
+        fprintf(stderr, "Error: No coordinators configured. Use 'unit-set --coord' first.\n");
+        return;
+    }
+
+    // Check if target exists
+    const char* check_ip = set_get_string(cfg, target_name, "ip", NULL);
+    if (!check_ip) {
+        fprintf(stderr, "Error: Coordinator '%s' not found in configuration.\n", target_name);
+        set_free(cfg);
+        return;
+    }
+
+    // Iterate through all sections to unset 'current' and set it for target
+    SetSection* sec = cfg->sections;
+    while (sec) {
+        if (strcmp(sec->name, "global") != 0) {
+            if (strcmp(sec->name, target_name) == 0) {
+                set_set_bool(cfg, sec->name, "current", 1);
+            } else {
+                set_set_bool(cfg, sec->name, "current", 0);
+            }
+        }
+        sec = sec->next;
+    }
+
+    if (set_save(cfg) == 0) {
+        printf("Switched to coordinator '%s' (%s).\n", target_name, check_ip);
+        printf("Please restart daemons to apply.\n");
+    } else {
+        perror("Error saving config");
+    }
+    set_free(cfg);
+}
+
 static int confirm_overwrite(const char* label, const char* current_val, const char* new_val) {
     // Case 1: No existing value (First time setup) -> Auto-approve
     if (current_val == NULL || strlen(current_val) == 0) {
@@ -1897,7 +1946,7 @@ static void run_unit_set(int argc, char* argv[]) {
         fprintf(stderr, "Usage: exodus unit-set <flag> [arguments...]\n");
         fprintf(stderr, "  --name <New Unit Name>      Set this unit's display name\n");
         fprintf(stderr, "  --desg <path/to/storage>    Set the designated folder for incoming Pushes\n");
-        fprintf(stderr, "  --coord <ip> <port>         Set the Coordinator address\n");
+        fprintf(stderr, "  --coord <coord-name> <ip> <port>         Set the Coordinator address\n");
         return;
     }
 
@@ -1908,20 +1957,45 @@ static void run_unit_set(int argc, char* argv[]) {
     }
 
     // --- Handle Coordinator Config (Separate File) ---
-    if (strcmp(argv[2], "--coord") == 0) {
-        if (argc != 5) {
-            fprintf(stderr, "Usage: exodus unit-set --coord <ip_address> <port>\n");
+if (strcmp(argv[2], "--coord") == 0) {
+        // Usage: --coord <Name> <IP> <Port>
+        if (argc != 6) {
+            fprintf(stderr, "Usage: exodus unit-set --coord <Name> <IP> <Port>\n");
             return;
         }
-        // Coordinator config is simple, just overwrite (less critical)
+        char* coord_name = argv[3];
+        char* ip = argv[4];
+        int port = atoi(argv[5]);
+
         char conf_path[PATH_MAX];
-        snprintf(conf_path, sizeof(conf_path), "%s/exodus-coord.conf", exe_dir);
-        FILE* f = fopen(conf_path, "w");
-        if (!f) { perror("Error writing coord config"); return; }
-        fprintf(f, "http://%s:%s\n", argv[3], argv[4]);
-        fclose(f);
-        printf("Coordinator set to http://%s:%s\n", argv[3], argv[4]);
-        printf("Please restart daemons to apply.\n");
+        snprintf(conf_path, sizeof(conf_path), "%s/exodus-coord.set", exe_dir);
+        
+        SetConfig* cfg = set_load(conf_path);
+        if (!cfg) cfg = set_create(conf_path);
+
+        // Check if this is an overwrite
+        const char* old_ip = set_get_string(cfg, coord_name, "ip", "");
+        if (strlen(old_ip) > 0) {
+            printf("Updating existing coordinator '%s'...\n", coord_name);
+            // Optional: Add confirm_overwrite logic here if you want
+        }
+
+        // Set values
+        set_set_string(cfg, coord_name, "ip", ip);
+        set_set_int(cfg, coord_name, "port", port);
+        
+        SetSection* sec = cfg->sections;
+        while (sec) {
+            set_set_bool(cfg, sec->name, "current", 0); // Reset all others
+            sec = sec->next;
+        }
+        set_set_bool(cfg, coord_name, "current", 1);
+
+        if (set_save(cfg) == 0) {
+            printf("Coordinator '%s' set to %s:%d (Active).\n", coord_name, ip, port);
+            printf("Please restart daemons.\n");
+        }
+        set_free(cfg);
         return;
     }
 
@@ -2894,6 +2968,8 @@ int main(int argc, char* argv[]) {
     } else if (strcmp(argv[1], "node-conf") == 0) {
         run_node_conf(argc, argv);
 
+    } else if (strcmp(argv[1], "connect") == 0) {
+        run_connect(argc, argv);
     }else if (strcmp(argv[1], "clean") == 0) {
         run_clean_history(argc, argv);
 

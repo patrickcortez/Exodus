@@ -122,43 +122,73 @@ int get_executable_dir(char* buffer, size_t size) {
 void load_coordinator_config() {
     char exe_dir[PATH_MAX];
     char conf_path[PATH_MAX];
+    
+    // Defaults
+    strncpy(g_coord_host, "127.0.0.1", sizeof(g_coord_host) - 1);
+    g_coord_port = 8080;
+
     if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) {
-        log_msg("Error: Could not find executable dir. Using default coordinator.");
-        strncpy(g_coord_host, "127.0.0.1", sizeof(g_coord_host) - 1);
-        g_coord_port = 8080;
+        log_msg("Error: Could not find executable dir. Using defaults.");
         return;
     }
     
-    snprintf(conf_path, sizeof(conf_path), "%s/%s", exe_dir, CONF_FILE_NAME);
+    // Check for new .set file first
+    snprintf(conf_path, sizeof(conf_path), "%s/exodus-coord.set", exe_dir);
     FILE* f = fopen(conf_path, "r");
-    if (!f) {
-        log_msg("Warning: '%s' not found. Creating default.", conf_path);
-        f = fopen(conf_path, "w");
-        if (f) {
-            fprintf(f, "http://127.0.0.1:8080\n");
-            fclose(f);
+    
+    if (f) {
+        fclose(f); // Exists, close and load with parser
+        SetConfig* cfg = set_load(conf_path);
+        if (cfg) {
+            // Iterate sections to find "current = true"
+            SetSection* sec = cfg->sections;
+            int found_active = 0;
+            while (sec) {
+                if (strcmp(sec->name, "global") != 0) {
+                    if (set_get_bool(cfg, sec->name, "current", 0)) {
+                        const char* ip = set_get_string(cfg, sec->name, "ip", "127.0.0.1");
+                        int port = (int)set_get_int(cfg, sec->name, "port", 8080);
+                        
+                        strncpy(g_coord_host, ip, sizeof(g_coord_host) - 1);
+                        g_coord_port = port;
+                        log_msg("Active Coordinator Profile: '%s' (%s:%d)", sec->name, g_coord_host, g_coord_port);
+                        found_active = 1;
+                        break;
+                    }
+                }
+                sec = sec->next;
+            }
+            if (!found_active) {
+                log_msg("Warning: No coordinator profile marked as 'current'. Using defaults.");
+            }
+            set_free(cfg);
+            return;
         }
-        strncpy(g_coord_host, "127.0.0.1", sizeof(g_coord_host) - 1);
-        g_coord_port = 8080;
-        return;
     }
     
-    char line[512];
-    if (fgets(line, sizeof(line), f)) {
-        line[strcspn(line, "\n")] = 0;
-        char* host_start = strstr(line, "://");
-        if (host_start) {
-            host_start += 3; // Skip "://"
-            char* port_start = strrchr(host_start, ':');
-            if (port_start) {
-                *port_start = '\0'; // Terminate host string
-                g_coord_port = atoi(port_start + 1);
-                strncpy(g_coord_host, host_start, sizeof(g_coord_host) - 1);
+    // Fallback to old .conf if .set doesn't exist (Migration path)
+    snprintf(conf_path, sizeof(conf_path), "%s/exodus-coord.conf", exe_dir);
+    f = fopen(conf_path, "r");
+    if (f) {
+        log_msg("Legacy config found (%s). Please upgrade using 'unit-set --coord'.", conf_path);
+        char line[512];
+        if (fgets(line, sizeof(line), f)) {
+            line[strcspn(line, "\n")] = 0;
+            char* host_start = strstr(line, "://");
+            if (host_start) {
+                host_start += 3;
+                char* port_start = strrchr(host_start, ':');
+                if (port_start) {
+                    *port_start = '\0';
+                    g_coord_port = atoi(port_start + 1);
+                    strncpy(g_coord_host, host_start, sizeof(g_coord_host) - 1);
+                }
             }
         }
+        fclose(f);
+    } else {
+        log_msg("No coordinator config found. Using default 127.0.0.1:8080");
     }
-    fclose(f);
-    log_msg("Coordinator config loaded: Host=%s, Port=%d", g_coord_host, g_coord_port);
 }
 
 void load_unit_config() {
