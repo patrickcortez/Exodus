@@ -17,6 +17,7 @@ SHR = shared
 #Headers
 
 INC = -Iinclude
+INCL = include
 
 #External Dependencies
 
@@ -30,7 +31,7 @@ LIBS_NCURSES = -lncursesw
 LIBS_MATH_ZLIB = -lm -lz
 
 # --- Source Files (for dependency tracking) ---
-HDR_COMMON = $(SRC_DIR)/exodus-common.h
+HDR_COMMON = $(INCL)/exodus-common.h
 
 # --- Target Binaries ---
 TARGETS = \

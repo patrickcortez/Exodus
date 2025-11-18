@@ -147,6 +147,8 @@ exodus commit node-name 1.0
   - sync:         Sync history with a remote node (e.g., sync <unit> <remote-node> <local-node>)
   - unit-set:     Set this machine's name or coordinator (--name, --coord)
   - view-cache    For debugging, views the local node list of the signal daemon, to make sure it's upto date.
+  - push          Push a node to another unit in your network.
+  - clone         Clone a Unit's node into your own unit(device).
 
 ---
 
@@ -194,6 +196,6 @@ exodus commit node-name 1.0
 
 ## Developer: 
 
-### Patrick Andrew Cortez
+ Patrick Andrew Cortez - 3rd Year Computer Engineering Student
 
 
