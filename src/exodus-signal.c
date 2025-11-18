@@ -55,6 +55,8 @@ static char g_unit_name[MAX_UNIT_NAME_LEN] = {0};
 static char* g_local_node_list_json = NULL; // Cache of this unit's nodes
 static pthread_mutex_t g_node_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char g_storage_path[PATH_MAX] = {0};
+static volatile int g_force_reconnect = 0;
+static pthread_mutex_t g_config_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Request Queue (from mesh to coordinator)
 typedef struct RequestNode {
@@ -120,6 +122,8 @@ int get_executable_dir(char* buffer, size_t size) {
 }
 
 void load_coordinator_config() {
+    pthread_mutex_lock(&g_config_mutex);
+
     char exe_dir[PATH_MAX];
     char conf_path[PATH_MAX];
     
@@ -189,6 +193,7 @@ void load_coordinator_config() {
     } else {
         log_msg("No coordinator config found. Using default 127.0.0.1:8080");
     }
+    pthread_mutex_unlock(&g_config_mutex);
 }
 
 void load_unit_config() {
@@ -419,6 +424,10 @@ void* mesh_listener_thread(void* arg) {
                 pthread_mutex_unlock(&g_request_queue_mutex);
                 pthread_cond_signal(&g_request_queue_cond);
             }
+        } else if (msg_type == MSG_SIG_RELOAD_CONFIG) {
+            log_msg("Received Hot Reload signal. Reloading configuration...");
+            load_coordinator_config(); // Reloads from disk
+            g_force_reconnect = 1;     // Triggers client thread to reset
         }
         else if (msg_type == MSG_TERMINATE) {
             log_msg("Received TERMINATE from cloud daemon.");
@@ -446,7 +455,22 @@ void* coordinator_client_thread(void* arg) {
     while (g_keep_running) {
         time_t now = time(NULL);
 
+        if (g_force_reconnect) {
+            log_msg("Hot Reload: Resetting connection state.");
+            connected_to_coord = 0;
+            last_register_time = 0;
+            g_force_reconnect = 0;
+        }
+
         if (now > last_register_time + 30) {
+            
+            char current_host[256];
+            int current_port;
+            
+            pthread_mutex_lock(&g_config_mutex);
+            strncpy(current_host, g_coord_host, sizeof(current_host)-1);
+            current_port = g_coord_port;
+            pthread_mutex_unlock(&g_config_mutex);
             log_msg("Registering with coordinator at %s:%d", g_coord_host, g_coord_port);
             
             char json_payload[512];

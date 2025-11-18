@@ -91,6 +91,8 @@ enum exodus_msg_types {
     MSG_SIG_REQUEST_VIEW_CACHE,  // (CLI -> Cloud -> Signal) Request to see signal's local node cache
     MSG_SIG_RESPONSE_VIEW_CACHE,
 
+    MSG_SIG_RELOAD_CONFIG,
+
 
     // Exodus -> Daemons
     MSG_TERMINATE = MESH_MSG_USER_START + 99,

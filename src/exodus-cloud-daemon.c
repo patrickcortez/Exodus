@@ -2379,6 +2379,7 @@ int main() {
                 case MSG_SIG_RESPONSE_VIEW_UNIT:
                 case MSG_SIG_RESPONSE_VIEW_CACHE:
                 case MSG_SIG_RESPONSE_RESOLVE_UNIT:
+                case MSG_SIG_RELOAD_CONFIG:
                 case MSG_OPERATION_ACK:
                 {
                     printf("[Cloud] Received response from signal, forwarding to query daemon.\n");
@@ -2815,10 +2816,10 @@ case MSG_CHANGE_WORD: {
             if (n->active != is_activating) {
                 n->active = is_activating;
                 if (is_activating) {
-                    // --- NEW ---
+
                     add_watches_recursively(n, n->path);
                 } else {
-                    // --- NEW ---
+
                     remove_all_watches_for_node(n);
                 }
             }
@@ -2856,7 +2857,7 @@ case MSG_REMOVE_NODE: {
 
     // --- Step 2: Perform all slow I/O and cleanup outside the lock ---
     if (node_to_remove) {
-        // --- NEW --- Remove all watches and clear cache for the node
+
         remove_all_watches_for_node(node_to_remove);
     
         // Delete log files

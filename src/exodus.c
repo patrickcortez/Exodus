@@ -1904,10 +1904,57 @@ static void run_connect(int argc, char* argv[]) {
 
     if (set_save(cfg) == 0) {
         printf("Switched to coordinator '%s' (%s).\n", target_name, check_ip);
-        printf("Please restart daemons to apply.\n");
+        cortez_mesh_t* mesh = cortez_mesh_init("exodus_client", NULL);
+        if (mesh) {
+            pid_t target_pid = find_query_daemon_pid();
+            if (target_pid > 0) {
+                printf("Sending hot reload signal...\n");
+                cortez_write_handle_t* h = cortez_mesh_begin_send_zc(mesh, target_pid, 1);
+                if (h) {
+                    cortez_mesh_commit_send_zc(h, MSG_SIG_RELOAD_CONFIG);
+                    printf("Network switched successfully.\n");
+                }
+            } else {
+                printf("Daemons not running. Profile saved for next start.\n");
+            }
+            cortez_mesh_shutdown(mesh);
+        }
     } else {
         perror("Error saving config");
     }
+    set_free(cfg);
+}
+
+static void run_coord_list() {
+    char exe_dir[PATH_MAX];
+    if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) return;
+
+    char conf_path[PATH_MAX];
+    snprintf(conf_path, sizeof(conf_path), "%s/exodus-coord.set", exe_dir);
+
+    SetConfig* cfg = set_load(conf_path);
+    if (!cfg) {
+        printf("No coordinator profiles found.\n");
+        return;
+    }
+
+    printf("--- Coordinator Profiles ---\n");
+    SetSection* sec = cfg->sections;
+    int found_any = 0;
+    
+    while (sec) {
+        if (strcmp(sec->name, "global") != 0) {
+            int is_current = set_get_bool(cfg, sec->name, "current", 0);
+            const char* ip = set_get_string(cfg, sec->name, "ip", "?.?.?.?");
+            long port = set_get_int(cfg, sec->name, "port", 0);
+
+            // Mark active one with '*'
+            printf(" %s %-15s [%s:%ld]\n", is_current ? "*" : " ", sec->name, ip, port);
+            found_any = 1;
+        }
+        sec = sec->next;
+    }
+    if (!found_any) printf("  (None)\n");
     set_free(cfg);
 }
 
@@ -2931,6 +2978,8 @@ static void print_detailed_usage(void) {
     fprintf(stderr, "  %-12s Set this machine's name or coordinator (--name, --coord)\n", "unit-set");
     fprintf(stderr, "  %-12s -For Debugging- View the signal daemon's local node cache\n", "view-cache");
     fprintf(stderr, "  %-12s Push a node's full data to a remote unit's designated storage\n", "push");
+    fprintf(stderr, "  %-12s List all coordinator profiles (active marked with *)\n", "coord-list");
+    fprintf(stderr, "  %-12s Switch to a specific coordinator profile (Hot Reload)\n", "connect");
     fprintf(stderr, "\n");
 }
 
