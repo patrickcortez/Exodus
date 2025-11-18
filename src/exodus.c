@@ -1867,6 +1867,7 @@ static void run_unit_set(int argc, char* argv[]) {
         fprintf(stderr, "Usage: exodus unit-set <flag> [arguments...]\n");
         fprintf(stderr, "  --name \"New Unit Name\"\n");
         fprintf(stderr, "  --coord <ip_address> <port>\n");
+        fprintf(stderr, "  --desig <path/to/dir>");
         return;
     }
 
