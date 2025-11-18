@@ -1974,7 +1974,7 @@ static void run_view_unit(cortez_mesh_t* mesh, pid_t target_pid, const char* uni
                 cortez_mesh_msg_release(mesh, msg);
                 return;
             }
-            const char* json_body = (const char*)cortez_msg_payload(msg) + sizeof(uint64_t);
+            const char* json_body = (const char*)cortez_msg_payload(msg);
             
             ctz_json_value* root = ctz_json_parse(json_body, NULL, 0);
             if (root && ctz_json_get_type(root) == CTZ_JSON_ARRAY) {
@@ -2677,6 +2677,7 @@ static void print_detailed_usage(void) {
     fprintf(stderr, "  %-12s List all nodes on a specific remote Unit\n", "view-unit");
     fprintf(stderr, "  %-12s Sync history with a remote node (e.g., sync <unit> <remote-node> <local-node>)\n", "sync");
     fprintf(stderr, "  %-12s Set this machine's name or coordinator (--name, --coord)\n", "unit-set");
+    fprintf(stderr, "  %-12s -For Debugging- View the signal daemon's local node cache\n", "view-cache");
     fprintf(stderr, "\n");
 }
 
@@ -3471,6 +3472,41 @@ int main(int argc, char* argv[]) {
             run_view_unit(mesh, target_pid, argv[2]);
         } else if (strcmp(argv[1], "sync") == 0 && argc == 5) {
             run_sync_node(mesh, target_pid, argv[2], argv[3], argv[4]);
+        } else if (strcmp(argv[1], "view-cache") == 0 && argc == 2) {
+            int sent_ok = 0;
+            for (int i = 0; i < 5; i++) {
+                cortez_write_handle_t* h = cortez_mesh_begin_send_zc(mesh, target_pid, 1); // Dummy 1-byte payload
+                if (h) {
+                    cortez_mesh_commit_send_zc(h, MSG_SIG_REQUEST_VIEW_CACHE);
+                    sent_ok = 1;
+                    break;
+                }
+                usleep(100000);
+            }
+            
+            if (!sent_ok) {
+                fprintf(stderr, "Failed to send VIEW_CACHE request.\n");
+            } else {
+                printf("Waiting for response [10s]...\n");
+                cortez_msg_t* msg = cortez_mesh_read(mesh, 10000);
+                if (msg) {
+                    if (cortez_msg_type(msg) == MSG_SIG_RESPONSE_VIEW_CACHE) {
+                        const char* json_body = (const char*)cortez_msg_payload(msg);
+                        printf("--- Signal Daemon Local Node Cache ---\n");
+                        // The payload is the raw JSON string
+                        printf("%s\n", json_body ? json_body : "(null)");
+                    } else if (cortez_msg_type(msg) == MSG_OPERATION_ACK) {
+                        const ack_t* ack = cortez_msg_payload(msg);
+                        fprintf(stderr, "Error from daemon: %s\n", ack->details);
+                    } else {
+                        fprintf(stderr, "Received unexpected response type: %d\n", cortez_msg_type(msg));
+                    }
+                    cortez_mesh_msg_release(mesh, msg);
+                } else {
+                    printf("No response from daemon (timeout).\n");
+                }
+            }
+
         }else if (strcmp(argv[1], "node-man") == 0) {
         run_node_man(argc, argv);
         } else{

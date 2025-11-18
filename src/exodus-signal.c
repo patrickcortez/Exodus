@@ -340,6 +340,37 @@ void* mesh_listener_thread(void* arg) {
                     free(new_req);
                 }
             }
+        }else if (msg_type == MSG_SIG_REQUEST_VIEW_CACHE) {
+            log_msg("Received VIEW_CACHE request from cloud daemon.");
+            
+            // The payload from the cloud daemon contains the original request_id
+            if (payload_size < sizeof(uint64_t)) {
+                log_msg("Error: VIEW_CACHE request is malformed (too small).");
+                cortez_mesh_msg_release(g_mesh, msg);
+                continue;
+            }
+            uint64_t request_id;
+            memcpy(&request_id, payload, sizeof(uint64_t));
+
+            pthread_mutex_lock(&g_node_cache_mutex);
+            
+            const char* cache_content = (g_local_node_list_json != NULL) ? g_local_node_list_json : "[]";
+            size_t content_len = strlen(cache_content);
+            size_t total_resp_size = sizeof(uint64_t) + content_len + 1; // +1 for null terminator
+
+            char* resp_buf = malloc(total_resp_size);
+            if (resp_buf) {
+                // Wrap the response with the original request_id
+                memcpy(resp_buf, &request_id, sizeof(uint64_t));
+                memcpy(resp_buf + sizeof(uint64_t), cache_content, content_len + 1);
+                
+                send_to_cloud(MSG_SIG_RESPONSE_VIEW_CACHE, resp_buf, total_resp_size);
+                
+                free(resp_buf);
+            }
+            
+            pthread_mutex_unlock(&g_node_cache_mutex);
+
         }
         else if (msg_type == MSG_TERMINATE) {
             log_msg("Received TERMINATE from cloud daemon.");

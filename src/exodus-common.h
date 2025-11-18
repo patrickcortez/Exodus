@@ -68,10 +68,6 @@ enum exodus_msg_types {
     MSG_NODE_MAN_MOVE = MESH_MSG_USER_START + 35,
     MSG_NODE_MAN_COPY = MESH_MSG_USER_START + 36,
 
-    // ===============================================
-    // BEGIN: LAN UNIT SYNC (Phase 1)
-    // ===============================================
-
     // Client -> Query -> Cloud -> Signal (Requests for Coordinator)
     MSG_SIG_REQUEST_UNIT_LIST = MESH_MSG_USER_START + 40, // Payload: (empty)
     MSG_SIG_REQUEST_VIEW_UNIT = MESH_MSG_USER_START + 41, // Payload: sig_view_unit_req_t
@@ -89,9 +85,9 @@ enum exodus_msg_types {
     // Signal -> Cloud (Incoming data from other Units)
     MSG_SIG_SYNC_DATA = MESH_MSG_USER_START + 47, // Payload: sig_sync_data_t
 
-    // ===============================================
-    // END: LAN UNIT SYNC (Phase 1)
-    // ===============================================
+    MSG_SIG_REQUEST_VIEW_CACHE,  // (CLI -> Cloud -> Signal) Request to see signal's local node cache
+    MSG_SIG_RESPONSE_VIEW_CACHE,
+
 
     // Exodus -> Daemons
     MSG_TERMINATE = MESH_MSG_USER_START + 99,
@@ -142,8 +138,6 @@ typedef struct {
     char node_name[MAX_NODE_NAME_LEN];
 } node_req_t;
 
-// For LIST_NODES_RESPONSE and VIEW_NODE_RESPONSE
-// This is a header for a variable-length data payload
 typedef struct {
     int item_count;
     char data[0]; // Flexible array of null-terminated strings
@@ -234,9 +228,6 @@ typedef struct {
     char dest_path[MAX_PATH_LEN];
 } node_man_move_copy_req_t;
 
-// ===============================================
-// BEGIN: LAN UNIT SYNC (Phase 1)
-// ===============================================
 
 #define MAX_UNIT_NAME_LEN 128
 #define MAX_SYNC_DATA_SIZE 4096 // For small history.json diffs
@@ -266,10 +257,6 @@ typedef struct {
     char target_node[MAX_NODE_NAME_LEN];
     char sync_payload_json[0];
 } sig_sync_data_t;
-
-// ===============================================
-// END: LAN UNIT SYNC (Phase 1)
-// ===============================================
 
 
 #endif // EXODUS_COMMON_H

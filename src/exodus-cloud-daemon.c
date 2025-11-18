@@ -1856,7 +1856,7 @@ void send_local_node_list_to_signal(cortez_mesh_t* mesh) {
     if (json_body) {
         printf("[Cloud] Sending updated node list to signal daemon.\n");
         // We use request_id 0, as this isn't a reply
-        send_wrapped_response_zc(mesh, g_signal_daemon_pid, MSG_SIG_CACHE_NODE_LIST, 0, json_body, strlen(json_body) + 1);
+        write_to_handle_and_commit(mesh, g_signal_daemon_pid, MSG_SIG_CACHE_NODE_LIST, json_body, strlen(json_body) + 1);
         free(json_body);
     }
 }
@@ -2377,6 +2377,7 @@ int main() {
             switch (msg_type) {
                 case MSG_SIG_RESPONSE_UNIT_LIST:
                 case MSG_SIG_RESPONSE_VIEW_UNIT:
+                case MSG_SIG_RESPONSE_VIEW_CACHE:
                 case MSG_OPERATION_ACK:
                 {
                     printf("[Cloud] Received response from signal, forwarding to query daemon.\n");
@@ -3193,6 +3194,7 @@ case MSG_REMOVE_NODE: {
             case MSG_SIG_REQUEST_UNIT_LIST:
                 case MSG_SIG_REQUEST_VIEW_UNIT:
                 case MSG_SIG_REQUEST_SYNC_NODE:
+                case MSG_SIG_REQUEST_VIEW_CACHE:
                 {
                     if (g_signal_daemon_pid == 0) {
                         ack.success = 0;
