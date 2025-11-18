@@ -1,7 +1,12 @@
-Exodus is a Real Time Multi Daemon File System Monitoring and Version Control that
+# Exodus
+
+Exodus is a Real Time Multi Daemon File System Monitoring & Version Control (C/Linux) that
 handles large files, all made in C. It has its own TUI for Editing Text Files,IPC and Daemon Management tool.
 
 [Set Up]
+To set up exodus, you must first, make sure the installers have the proper permissions:
+
+chmod +x install, chmod +X install-k, chmod +x install-dependencies, and last: chmod +x uninstall
 
 Exodus has minimal Dependencies, make sure to run:
 
