@@ -24,7 +24,7 @@ INCL = include
 CORTEZ_IPC_OBJ  = $(SHR)/cortez_ipc.o
 CORTEZ_MESH_OBJ = $(SHR)/cortez-mesh.o
 CTZ_JSON_LIB    = $(SHR)/ctz-json.a
-CTZ_SET = $=
+CTZ_SET = $(SHR)/ctz-set.a
 
 # --- Libraries ---
 LIBS_PTHREAD = -pthread
