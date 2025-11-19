@@ -363,7 +363,41 @@ static uint8_t gmul(uint8_t a, uint8_t b) {
     return p;
 }
 
-// --- FIX: Removed incorrect '(*state)' wrapper ---
+static void conf_set_string(SetConfig* cfg, const char* section, const char* key, const char* val) {
+    SetNode* root = set_get_root(cfg);
+    if (!root) return;
+    
+    // Get or Create Section
+    SetNode* sec_node = set_get_child(root, section);
+    if (!sec_node) sec_node = set_set_child(root, section, SET_TYPE_MAP);
+    
+    // Set Value
+    SetNode* val_node = set_set_child(sec_node, key, SET_TYPE_STRING);
+    set_node_set_string(val_node, val);
+}
+
+static void conf_set_int(SetConfig* cfg, const char* section, const char* key, long val) {
+    SetNode* root = set_get_root(cfg);
+    if (!root) return;
+
+    SetNode* sec_node = set_get_child(root, section);
+    if (!sec_node) sec_node = set_set_child(root, section, SET_TYPE_MAP);
+
+    SetNode* val_node = set_set_child(sec_node, key, SET_TYPE_INT);
+    set_node_set_int(val_node, val);
+}
+
+static void conf_set_bool(SetConfig* cfg, const char* section, const char* key, int val) {
+    SetNode* root = set_get_root(cfg);
+    if (!root) return;
+
+    SetNode* sec_node = set_get_child(root, section);
+    if (!sec_node) sec_node = set_set_child(root, section, SET_TYPE_MAP);
+
+    SetNode* val_node = set_set_child(sec_node, key, SET_TYPE_BOOL);
+    set_node_set_bool(val_node, val);
+}
+
 static void MixColumns(uint8_t (*state)[4]) {
   uint8_t i;
   uint8_t Tmp, Tm, t;
@@ -1877,33 +1911,36 @@ static void run_connect(int argc, char* argv[]) {
 
     SetConfig* cfg = set_load(conf_path);
     if (!cfg) {
-        fprintf(stderr, "Error: No coordinators configured. Use 'unit-set --coord' first.\n");
+        fprintf(stderr, "Error: No coordinators configured.\n");
         return;
     }
 
-    // Check if target exists
+    // Check if target exists (Navigating DOM)
     const char* check_ip = set_get_string(cfg, target_name, "ip", NULL);
     if (!check_ip) {
-        fprintf(stderr, "Error: Coordinator '%s' not found in configuration.\n", target_name);
+        fprintf(stderr, "Error: Coordinator '%s' not found.\n", target_name);
         set_free(cfg);
         return;
     }
 
-    // Iterate through all sections to unset 'current' and set it for target
-    SetSection* sec = cfg->sections;
-    while (sec) {
-        if (strcmp(sec->name, "global") != 0) {
-            if (strcmp(sec->name, target_name) == 0) {
-                set_set_bool(cfg, sec->name, "current", 1);
-            } else {
-                set_set_bool(cfg, sec->name, "current", 0);
-            }
+    // Iterate Root to toggle 'current'
+    SetNode* root = set_get_root(cfg);
+    SetIterator* iter = set_iter_create(root);
+    while (set_iter_next(iter)) {
+        const char* sec_name = set_iter_key(iter);
+        SetNode* sec_node = set_iter_value(iter);
+
+        if (strcmp(sec_name, "global") != 0 && set_node_type(sec_node) == SET_TYPE_MAP) {
+             int is_current = (strcmp(sec_name, target_name) == 0);
+             SetNode* curr_node = set_set_child(sec_node, "current", SET_TYPE_BOOL);
+             set_node_set_bool(curr_node, is_current);
         }
-        sec = sec->next;
     }
+    set_iter_free(iter);
 
     if (set_save(cfg) == 0) {
         printf("Switched to coordinator '%s' (%s).\n", target_name, check_ip);
+        // ... (Keep existing mesh reload logic here) ...
         cortez_mesh_t* mesh = cortez_mesh_init("exodus_client", NULL);
         if (mesh) {
             pid_t target_pid = find_query_daemon_pid();
@@ -1939,21 +1976,25 @@ static void run_coord_list() {
     }
 
     printf("--- Coordinator Profiles ---\n");
-    SetSection* sec = cfg->sections;
+    SetNode* root = set_get_root(cfg);
+    SetIterator* iter = set_iter_create(root);
     int found_any = 0;
-    
-    while (sec) {
-        if (strcmp(sec->name, "global") != 0) {
-            int is_current = set_get_bool(cfg, sec->name, "current", 0);
-            const char* ip = set_get_string(cfg, sec->name, "ip", "?.?.?.?");
-            long port = set_get_int(cfg, sec->name, "port", 0);
 
-            // Mark active one with '*'
-            printf(" %s %-15s [%s:%ld]\n", is_current ? "*" : " ", sec->name, ip, port);
+    while(set_iter_next(iter)) {
+        const char* sec_name = set_iter_key(iter);
+        SetNode* sec_node = set_iter_value(iter);
+
+        if (strcmp(sec_name, "global") != 0 && set_node_type(sec_node) == SET_TYPE_MAP) {
+            int is_current = set_node_bool(set_get_child(sec_node, "current"), 0);
+            const char* ip = set_node_string(set_get_child(sec_node, "ip"), "?.?.?.?");
+            long port = set_node_int(set_get_child(sec_node, "port"), 0);
+
+            printf(" %s %-15s [%s:%ld]\n", is_current ? "*" : " ", sec_name, ip, port);
             found_any = 1;
         }
-        sec = sec->next;
     }
+    set_iter_free(iter);
+
     if (!found_any) printf("  (None)\n");
     set_free(cfg);
 }
@@ -2004,7 +2045,7 @@ static void run_unit_set(int argc, char* argv[]) {
     }
 
     // --- Handle Coordinator Config (Separate File) ---
-if (strcmp(argv[2], "--coord") == 0) {
+    if (strcmp(argv[2], "--coord") == 0) {
         // Usage: --coord <Name> <IP> <Port>
         if (argc != 6) {
             fprintf(stderr, "Usage: exodus unit-set --coord <Name> <IP> <Port>\n");
@@ -2024,19 +2065,32 @@ if (strcmp(argv[2], "--coord") == 0) {
         const char* old_ip = set_get_string(cfg, coord_name, "ip", "");
         if (strlen(old_ip) > 0) {
             printf("Updating existing coordinator '%s'...\n", coord_name);
-            // Optional: Add confirm_overwrite logic here if you want
         }
 
-        // Set values
-        set_set_string(cfg, coord_name, "ip", ip);
-        set_set_int(cfg, coord_name, "port", port);
+        // Set specific values using our new DOM helpers
+        conf_set_string(cfg, coord_name, "ip", ip);
+        conf_set_int(cfg, coord_name, "port", port);
         
-        SetSection* sec = cfg->sections;
-        while (sec) {
-            set_set_bool(cfg, sec->name, "current", 0); // Reset all others
-            sec = sec->next;
+        // Iterate root to reset 'current' flags
+        SetNode* root = set_get_root(cfg);
+        if (root) {
+            SetIterator* iter = set_iter_create(root);
+            while (set_iter_next(iter)) {
+                const char* sec_name = set_iter_key(iter);
+                SetNode* sec_node = set_iter_value(iter);
+                
+                // Skip global or non-map nodes
+                if (strcmp(sec_name, "global") == 0) continue;
+                if (set_node_type(sec_node) != SET_TYPE_MAP) continue;
+
+                // Set current=1 for target, 0 for others
+                int is_current = (strcmp(sec_name, coord_name) == 0);
+                
+                SetNode* curr_node = set_set_child(sec_node, "current", SET_TYPE_BOOL);
+                set_node_set_bool(curr_node, is_current);
+            }
+            set_iter_free(iter);
         }
-        set_set_bool(cfg, coord_name, "current", 1);
 
         if (set_save(cfg) == 0) {
             printf("Coordinator '%s' set to %s:%d (Active).\n", coord_name, ip, port);
@@ -2050,12 +2104,9 @@ if (strcmp(argv[2], "--coord") == 0) {
     char conf_path[PATH_MAX];
     snprintf(conf_path, sizeof(conf_path), "%s/exodus-unit.set", exe_dir);
 
-    // 1. Load existing config using ctz-set
+    // 1. Load existing config
     SetConfig* config = set_load(conf_path);
-    if (!config) {
-        fprintf(stderr, "Error loading configuration.\n");
-        return;
-    }
+    if (!config) config = set_create(conf_path); // Create if missing
 
     int save_needed = 0;
 
@@ -2067,7 +2118,7 @@ if (strcmp(argv[2], "--coord") == 0) {
         int result = confirm_overwrite("Unit Name", current_name, argv[3]);
         
         if (result == 1) {
-            set_set_string(config, "unit", "name", argv[3]);
+            conf_set_string(config, "unit", "name", argv[3]);
             save_needed = 1;
         } else if (result == -1) {
             set_free(config);
@@ -2079,13 +2130,11 @@ if (strcmp(argv[2], "--coord") == 0) {
         
         char resolved_path[PATH_MAX];
         if (realpath(argv[3], resolved_path) == NULL) {
-            // If path doesn't exist, ask to create it or abort
             fprintf(stderr, "Warning: Path '%s' does not exist.\n", argv[3]);
-            // Try to use absolute path anyway if user provided absolute
             if (argv[3][0] == '/') {
                  strncpy(resolved_path, argv[3], sizeof(resolved_path)-1);
             } else {
-                 fprintf(stderr, "Error: Please provide a valid, absolute path, or create the directory first.\n");
+                 fprintf(stderr, "Error: Please provide a valid, absolute path.\n");
                  set_free(config);
                  return;
             }
@@ -2095,7 +2144,7 @@ if (strcmp(argv[2], "--coord") == 0) {
         int result = confirm_overwrite("Storage Path", current_storage, resolved_path);
         
         if (result == 1) {
-            set_set_string(config, "storage", "path", resolved_path);
+            conf_set_string(config, "storage", "path", resolved_path);
             save_needed = 1;
         } else if (result == -1) {
             set_free(config);
@@ -2108,7 +2157,7 @@ if (strcmp(argv[2], "--coord") == 0) {
         return;
     }
 
-    // 3. Safe Write (Only if changed)
+    // 3. Safe Write
     if (save_needed) {
         if (set_save(config) == 0) {
             printf("Configuration updated successfully.\n");
@@ -3019,7 +3068,9 @@ int main(int argc, char* argv[]) {
 
     } else if (strcmp(argv[1], "connect") == 0) {
         run_connect(argc, argv);
-    }else if (strcmp(argv[1], "clean") == 0) {
+    } else if (strcmp(argv[1], "coord-list") == 0) {
+        run_coord_list();
+    } else if (strcmp(argv[1], "clean") == 0) {
         run_clean_history(argc, argv);
 
     } else if (strcmp(argv[1], "node-edit") == 0) {

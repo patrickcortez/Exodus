@@ -73,6 +73,21 @@ static pthread_cond_t g_request_queue_cond = PTHREAD_COND_INITIALIZER;
 
 // --- Utility Functions ---
 
+static void set_set_string(SetConfig* cfg, const char* section, const char* key, const char* val) {
+    SetNode* root = set_get_root(cfg);
+    if (!root) return;
+
+    // Get or Create Section (Map)
+    SetNode* sec_node = set_get_child(root, section);
+    if (!sec_node) {
+        sec_node = set_set_child(root, section, SET_TYPE_MAP);
+    }
+
+    // Create or Update Key (String)
+    SetNode* val_node = set_set_child(sec_node, key, SET_TYPE_STRING);
+    set_node_set_string(val_node, val);
+}
+
 void log_msg(const char* format, ...) {
     va_list args;
     va_start(args, format);
@@ -133,6 +148,7 @@ void load_coordinator_config() {
 
     if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) {
         log_msg("Error: Could not find executable dir. Using defaults.");
+        pthread_mutex_unlock(&g_config_mutex);
         return;
     }
     
@@ -145,23 +161,38 @@ void load_coordinator_config() {
         SetConfig* cfg = set_load(conf_path);
         if (cfg) {
             // Iterate sections to find "current = true"
-            SetSection* sec = cfg->sections;
+            SetNode* root = set_get_root(cfg);
+            SetIterator* iter = set_iter_create(root);
             int found_active = 0;
-            while (sec) {
-                if (strcmp(sec->name, "global") != 0) {
-                    if (set_get_bool(cfg, sec->name, "current", 0)) {
-                        const char* ip = set_get_string(cfg, sec->name, "ip", "127.0.0.1");
-                        int port = (int)set_get_int(cfg, sec->name, "port", 8080);
+
+            while (set_iter_next(iter)) {
+                const char* sec_name = set_iter_key(iter);
+                SetNode* sec_node = set_iter_value(iter);
+
+                // Skip "global" and ensure the node is a Map (section)
+                if (strcmp(sec_name, "global") != 0 && set_node_type(sec_node) == SET_TYPE_MAP) {
+                    
+                    // Check if 'current' is true in this section
+                    SetNode* current_node = set_get_child(sec_node, "current");
+                    if (set_node_bool(current_node, 0)) {
+                        
+                        SetNode* ip_node = set_get_child(sec_node, "ip");
+                        const char* ip = set_node_string(ip_node, "127.0.0.1");
+                        
+                        SetNode* port_node = set_get_child(sec_node, "port");
+                        int port = (int)set_node_int(port_node, 8080);
                         
                         strncpy(g_coord_host, ip, sizeof(g_coord_host) - 1);
                         g_coord_port = port;
-                        log_msg("Active Coordinator Profile: '%s' (%s:%d)", sec->name, g_coord_host, g_coord_port);
+                        log_msg("Active Coordinator Profile: '%s' (%s:%d)", sec_name, g_coord_host, g_coord_port);
                         found_active = 1;
                         break;
                     }
                 }
-                sec = sec->next;
             }
+            set_iter_free(iter);
+            
+            // MOVED: Check found_active INSIDE the cfg block
             if (!found_active) {
                 log_msg("Warning: No coordinator profile marked as 'current'. Using defaults.");
             }
@@ -215,7 +246,10 @@ void load_unit_config() {
     if (!cfg) {
         log_msg("Config not found. Creating default at %s", conf_path);
         cfg = set_create(conf_path);
+        
+        // This now calls the static helper defined above
         set_set_string(cfg, "unit", "name", default_name);
+        
         set_save(cfg);
     }
 
@@ -464,7 +498,7 @@ void* coordinator_client_thread(void* arg) {
         }
 
         if (now > last_register_time + 30) {
-            
+
             char current_host[256];
             int current_port;
             
@@ -840,10 +874,21 @@ void* handle_coordinator_request(void* arg) {
         mkdir(g_storage_path, 0755);
         mkdir(target_dir, 0755);
 
+        char* cl_line = strstr(buffer, "Content-Length:");
+        long content_len = 0;
+        if (cl_line) {
+            content_len = atol(cl_line + 15);
+        }
+        
+        if (content_len <= 0) {
+             const char* err = "HTTP/1.1 411 Length Required\r\n\r\n";
+             write(sock_fd, err, strlen(err));
+             close(sock_fd); free(buffer); return NULL;
+        }
+
         char temp_archive[PATH_MAX];
         snprintf(temp_archive, sizeof(temp_archive), "%s/%s.tar", g_storage_path, node_name);
 
-        // 3. Stream Data to Disk
         FILE* f_tmp = fopen(temp_archive, "wb");
         if (!f_tmp) {
              const char* err = "HTTP/1.1 500 Server Error\r\n\r\nDisk Write Failed.";
@@ -851,44 +896,64 @@ void* handle_coordinator_request(void* arg) {
              close(sock_fd); free(buffer); return NULL;
         }
 
-        // Write what we already read into the buffer
-        char* body_ptr = body; // 'body' pointer calculated earlier in function
+        // Write what we already read into the buffer (body_ptr is the start of body)
+        char* body_ptr = body; 
         ssize_t initial_bytes = n - (body_ptr - buffer);
-        if (initial_bytes > 0) fwrite(body_ptr, 1, initial_bytes, f_tmp);
+        if (initial_bytes > 0) {
+            fwrite(body_ptr, 1, initial_bytes, f_tmp);
+        }
 
-        // Pump the rest from socket
+        size_t total_received = initial_bytes;
+        size_t remaining = content_len - total_received;
+        
+        // Pump the rest from socket using exact count
         char stream_buf[65536];
         ssize_t r;
-        size_t total_received = initial_bytes;
         
-        // Set a receive timeout just in case
         struct timeval tv; tv.tv_sec = 30; tv.tv_usec = 0;
         setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
 
-        while ((r = read(sock_fd, stream_buf, sizeof(stream_buf))) > 0) {
+        while (remaining > 0) {
+            size_t to_read = (remaining > sizeof(stream_buf)) ? sizeof(stream_buf) : remaining;
+            r = read(sock_fd, stream_buf, to_read);
+            
+            if (r <= 0) {
+                if (errno == EINTR) continue;
+                break; // Error or premature EOF
+            }
+            
             fwrite(stream_buf, 1, r, f_tmp);
             total_received += r;
+            remaining -= r;
+
+            if (total_received % (1024 * 1024) == 0) {
+                log_msg("Receiving Push: %zu / %ld bytes...", total_received, content_len);
+            }
         }
         fclose(f_tmp);
         
-        log_msg("Push received (%zu bytes). Unpacking...", total_received);
-
-        // 4. Unpack
-        char cmd[PATH_MAX * 3];
-        // Fast tar extraction
-        snprintf(cmd, sizeof(cmd), "tar -xf \"%s\" -C \"%s\"", temp_archive, target_dir);
-        int unpack_ret = system(cmd);
-        
-        remove(temp_archive); // Cleanup temp file
-
-        if (unpack_ret == 0) {
-            const char* done = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nPush Successful.";
-            write(sock_fd, done, strlen(done));
-            log_msg("Node '%s' successfully pushed and unpacked.", node_name);
+        if (remaining > 0) {
+             log_msg("Error: Premature end of stream. Expected %ld, got %zu.", content_len, total_received);
+             const char* err = "HTTP/1.1 400 Bad Request\r\n\r\nIncomplete Transfer.";
+             write(sock_fd, err, strlen(err));
         } else {
-            const char* err = "HTTP/1.1 500 Server Error\r\n\r\nUnpack Failed.";
-            write(sock_fd, err, strlen(err));
-            log_msg("Error unpacking node '%s'.", node_name);
+            log_msg("Push received complete (%zu bytes). Unpacking...", total_received);
+            
+            // 4. Unpack
+            char cmd[PATH_MAX * 3];
+            snprintf(cmd, sizeof(cmd), "tar -xf \"%s\" -C \"%s\"", temp_archive, target_dir);
+            int unpack_ret = system(cmd);
+            remove(temp_archive); 
+
+            if (unpack_ret == 0) {
+                const char* done = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nPush Successful.";
+                write(sock_fd, done, strlen(done));
+                log_msg("Node '%s' successfully pushed and unpacked.", node_name);
+            } else {
+                const char* err = "HTTP/1.1 500 Server Error\r\n\r\nUnpack Failed.";
+                write(sock_fd, err, strlen(err));
+                log_msg("Error unpacking node '%s'.", node_name);
+            }
         }
     } else {
         const char* not_found_resp = "HTTP/1.1 404 Not Found\r\n"
