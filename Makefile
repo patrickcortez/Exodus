@@ -6,6 +6,7 @@ CC = gcc
 # Common flags from your source files: -Wall -Wextra -O2
 
 CFLAGS = -Wall -Wextra -O2
+CFL = -Wall -O2
 
 #Directories
 
@@ -46,6 +47,12 @@ TARGETS = \
 	$(BIN_DIR)/node-editor \
 	$(BIN_DIR)/exodus-signal
 
+LIBRARIES = \
+	$(SRC_DIR)/ctz-json.c \
+	$(SRC_DIR)/ctz-set.c \
+	$(SRC_DIR)/cortez-mesh \
+	$(SRC_DIR)/cortez-ipc.c
+
 SERVER = $(SRV)/exodus-coordinator.c
 
 SRV_OUT = s-bin
@@ -62,8 +69,6 @@ $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)
 
 # --- Individual Binary Build Rules ---
-# We use specific rules because binary names don't always match .c file names
-# and dependencies differ.
 
 # 1. exctl
 $(BIN_DIR)/exctl: $(SRC_DIR)/exctl.c $(CTZ_JSON_LIB) $(HDR_COMMON) | $(BIN_DIR)
@@ -100,15 +105,25 @@ $(BIN_DIR)/node-editor: $(SRC_DIR)/node-editor.c | $(BIN_DIR)
 $(BIN_DIR)/exodus-signal: $(SRC_DIR)/exodus-signal.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(CTZ_SET) $(HDR_COMMON) | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/exodus-signal.c $(CORTEZ_MESH_OBJ) $(CTZ_JSON_LIB) $(CTZ_SET) $(LIBS_PTHREAD) $(INC)
 
+#Compile Server
 server: $(SRV_OUT)
 	@echo "Compiling $(SERVER)"
 	$(CC) $(CFLAGS) $(SERVER) $(CTZ_JSON_LIB) -o $(STARGET) $(LIBS_PTHREAD) $(INC)
 
-$(SRV_OUT):
-	@echo "Creating $(SRV_OUT)"
-	@mkdir -p $(SRV_OUT)
+#Compile Libraries
+lib: $(LIBRARIES)
+
+	$(CC) -c $(SRC_DIR)/ctz-set.c -o $(SHR)/ctz-set.o $(CFL) $(INC)
+
+	$(CC) -c $(SRC_DIR)/ctz-json.c -o $(SHR)/ctz-json.o $(CFL) $(INC)
+
+	$(CC) -c $(SRC_DIR)/cortez-mesh.c -o $(SHR)/cortez-mesh.o $(CFL) $(INC)
+
+	$(CC) -c $(SRC_DIR)/cortez-ipc.c -o $(SHR)/cortez_ipc.o $(CFL) $(INC)
+
 
 $(SRV_OUT):
+	@echo "Creating $(SRV_OUT)"
 	@mkdir -p $(SRV_OUT)
 
 
@@ -116,8 +131,6 @@ $(SRV_OUT):
 clean:
 	@echo "Cleaning up $(BIN_DIR)..."
 	@rm -rf $(BIN_DIR)
-
-clean-s:
 	@echo "Cleaning up $(SRV_OUT)"
 	@rm -rf $(SRV_OUT)
 

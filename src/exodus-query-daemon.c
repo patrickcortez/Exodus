@@ -186,12 +186,13 @@ int main() {
             }
         
         // --- Handle responses from the cloud daemon ---
-        }else if ((msg_type >= MSG_QUERY_RESPONSE && msg_type <= MSG_INFO_NODE_RESPONSE) || 
-                   msg_type == MSG_LOOKUP_RESPONSE ||
-                   msg_type == MSG_OPERATION_ACK || 
-                   msg_type == MSG_SIG_RESPONSE_UNIT_LIST || 
-                   msg_type == MSG_SIG_RESPONSE_VIEW_UNIT ||
-                   msg_type == MSG_SIG_RESPONSE_VIEW_CACHE){
+        } else if ((msg_type >= MSG_QUERY_RESPONSE && msg_type <= MSG_INFO_NODE_RESPONSE) || 
+           msg_type == MSG_LOOKUP_RESPONSE ||
+           msg_type == MSG_OPERATION_ACK || 
+           msg_type == MSG_SIG_RESPONSE_UNIT_LIST || 
+           msg_type == MSG_SIG_RESPONSE_VIEW_UNIT ||
+           msg_type == MSG_SIG_RESPONSE_VIEW_CACHE || 
+           msg_type == MSG_SIG_RESPONSE_RESOLVE_UNIT) {
             if (sender_pid != cloud_daemon_pid) {
                  printf("[Query] WARNING: Received a response from an unknown source (%d), ignoring.\n", sender_pid);
                  cortez_mesh_msg_release(mesh, msg);
