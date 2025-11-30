@@ -1,0 +1,10 @@
+{
+  "voice_worker": { "path": "/home/cortez/Documents/Projects/voice_worker/voice_worker" }
+<<<<<<< HEAD
+,
+  "sample": { "path": "sample" }
+,
+  "sam1": { "path": "/home/cortez/Documents/Projects/cortez-terminal/root/home/patrick/scripts/sample" }
+=======
+>>>>>>> f889ef25079397848a0aa640122147f0e93ad110
+}

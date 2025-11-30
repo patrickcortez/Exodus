@@ -1,0 +1,1 @@
+savedcmd_cortez_cokernel.ko := ld -r -m elf_x86_64 -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T /usr/src/linux-headers-6.14.0-36-generic/scripts/module.lds -o cortez_cokernel.ko cortez_cokernel.o cortez_cokernel.mod.o .module-common.o

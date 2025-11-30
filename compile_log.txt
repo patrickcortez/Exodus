@@ -1,0 +1,90 @@
+src/cortez_frontend.c: In function ‘create_corner_shadow’:
+src/cortez_frontend.c:517:19: warning: unused variable ‘dy’ [-Wunused-variable]
+  517 |             float dy = (float)(s-1 - y);
+      |                   ^~
+src/cortez_frontend.c:516:19: warning: unused variable ‘dx’ [-Wunused-variable]
+  516 |             float dx = (float)(s-1 - x); /* distance from bottom-right of this small quad when we flip */
+      |                   ^~
+src/cortez_frontend.c:513:11: warning: unused variable ‘maxd’ [-Wunused-variable]
+  513 |     float maxd = sqrtf((float)(s*s) + (float)(s*s));
+      |           ^~~~
+src/cortez_frontend.c:512:11: warning: unused variable ‘cy’ [-Wunused-variable]
+  512 |     float cy = (s-1)*0.0f;
+      |           ^~
+src/cortez_frontend.c:511:11: warning: unused variable ‘cx’ [-Wunused-variable]
+  511 |     float cx = (s-1)*0.0f; /* we'll use distance from corner (0,0) */
+      |           ^~
+src/cortez_frontend.c: In function ‘run_simple_editor’:
+src/cortez_frontend.c:1218:22: warning: unused variable ‘ss’ [-Wunused-variable]
+ 1218 |         SDL_Surface *ss = TTF_RenderUTF8_Blended(font, sb, (SDL_Color){200,180,140,255});
+      |                      ^~
+src/cortez_frontend.c:1059:9: warning: unused variable ‘inset_x’ [-Wunused-variable]
+ 1059 |     int inset_x = 18, inset_y = 18;
+      |         ^~~~~~~
+src/cortez_frontend.c: In function ‘run_node_editor’:
+src/cortez_frontend.c:1619:22: warning: unused variable ‘ss’ [-Wunused-variable]
+ 1619 |         SDL_Surface *ss = TTF_RenderUTF8_Blended(font, sb, (SDL_Color){200,180,140,255});
+      |                      ^~
+src/cortez_frontend.c:1673:13: error: invalid storage class for function ‘run_video_viewer’
+ 1673 | static void run_video_viewer(const char *video_path, SDL_Window *win, SDL_Renderer *rend, TTF_Font *font,
+      |             ^~~~~~~~~~~~~~~~
+src/cortez_frontend.c: In function ‘run_video_viewer’:
+src/cortez_frontend.c:1704:22: warning: initialization discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 1704 |     AVCodec *codec = avcodec_find_decoder(codec_params->codec_id);
+      |                      ^~~~~~~~~~~~~~~~~~~~
+src/cortez_frontend.c:1724:36: warning: initialization discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+ 1724 |             AVCodec *audio_codec = avcodec_find_decoder(audio_codec_params->codec_id);
+      |                                    ^~~~~~~~~~~~~~~~~~~~
+src/cortez_frontend.c:1742:9: warning: ‘channel_layout’ is deprecated [-Wdeprecated-declarations]
+ 1742 |         av_opt_set_int(swr_ctx_audio = swr_alloc(), "in_channel_layout", audio_codec_ctx->channel_layout, 0);
+      |         ^~~~~~~~~~~~~~
+In file included from src/cortez_frontend.c:25:
+/usr/include/x86_64-linux-gnu/libavcodec/avcodec.h:1130:14: note: declared here
+ 1130 |     uint64_t channel_layout;
+      |              ^~~~~~~~~~~~~~
+src/cortez_frontend.c: In function ‘run_node_editor’:
+src/cortez_frontend.c:1912:13: error: invalid storage class for function ‘run_image_viewer’
+ 1912 | static void run_image_viewer(const char *image_path, SDL_Renderer *rend, TTF_Font *font,
+      |             ^~~~~~~~~~~~~~~~
+src/cortez_frontend.c:2084:5: warning: ‘main’ is normally a non-static function [-Wmain]
+ 2084 | int main(int argc, char **argv) {
+      |     ^~~~
+src/cortez_frontend.c: In function ‘main’:
+src/cortez_frontend.c:2357:13: warning: unused variable ‘login_h’ [-Wunused-variable]
+ 2357 |         int login_h = 500;
+      |             ^~~~~~~
+src/cortez_frontend.c:2356:13: warning: unused variable ‘login_w’ [-Wunused-variable]
+ 2356 |         int login_w = 900;
+      |             ^~~~~~~
+src/cortez_frontend.c:2779:17: warning: unused variable ‘sticker_y’ [-Wunused-variable]
+ 2779 |             int sticker_y = leds_y - 6;                /* aligns roughly with LEDs baseline */
+      |                 ^~~~~~~~~
+src/cortez_frontend.c:2778:17: warning: unused variable ‘sticker_x’ [-Wunused-variable]
+ 2778 |             int sticker_x = screen_x + screen_w - 180; /* tweak -180 to move further left/right */
+      |                 ^~~~~~~~~
+src/cortez_frontend.c: In function ‘run_node_editor’:
+src/cortez_frontend.c:2790:1: error: expected declaration or statement at end of input
+ 2790 | }
+      | ^
+src/cortez_frontend.c:1473:9: warning: unused variable ‘inset_x’ [-Wunused-variable]
+ 1473 |     int inset_x = 18, inset_y = 18;
+      |         ^~~~~~~
+src/cortez_frontend.c: At top level:
+src/cortez_frontend.c:2084:5: warning: ‘main’ defined but not used [-Wunused-function]
+ 2084 | int main(int argc, char **argv) {
+      |     ^~~~
+src/cortez_frontend.c:905:14: warning: ‘run_crt_login’ defined but not used [-Wunused-function]
+  905 | static char *run_crt_login(SDL_Window *win, SDL_Renderer *rend, TTF_Font *font,
+      |              ^~~~~~~~~~~~~
+src/cortez_frontend.c:541:21: warning: ‘create_side_glow’ defined but not used [-Wunused-function]
+  541 | static SDL_Texture *create_side_glow(SDL_Renderer *rend, int w, int h, int max_green, int left)
+      |                     ^~~~~~~~~~~~~~~~
+src/cortez_frontend.c:505:21: warning: ‘create_corner_shadow’ defined but not used [-Wunused-function]
+  505 | static SDL_Texture *create_corner_shadow(SDL_Renderer *rend, int s, int max_alpha)
+      |                     ^~~~~~~~~~~~~~~~~~~~
+src/cortez_frontend.c:98:20: warning: ‘get_fs_root’ defined but not used [-Wunused-function]
+   98 | static const char *get_fs_root(void) {
+      |                    ^~~~~~~~~~~
+src/cortez_frontend.c:83:12: warning: ‘is_in_bin_dir’ defined but not used [-Wunused-function]
+   83 | static int is_in_bin_dir(void) {
+      |            ^~~~~~~~~~~~~

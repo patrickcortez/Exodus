@@ -1,0 +1,312 @@
+Users: -: -:
+  :-, -:
+    username: "patrick"
+    password: "112595"
+    settings: -:
+      theme: "Red"
+      notifications: true
+    :-
+    bio: "I love Computer Engineering and
+I am a Nerd =0
+From PH"
+    requests_in: -: "PROCESSED", "PROCESSED" :-
+    friends: -: "Annie", "Lanna" :-
+  :-, -:
+    username: "Annie"
+    password: "annie"
+    settings: -:
+      theme: "Default Blue"
+      notifications: true
+    :-
+    bio: "I love jams and hams
+and songs and bongs
+and gongs and tongs
+its so long for a song"
+    friends: -: "patrick", "Lanna" :-
+    requests_in: -: "PROCESSED" :-
+  :-, -:
+    username: "Lanna"
+    password: "Annal"
+    bio: "I luv goocie in my coochie
+i got pounded by a dog lol"
+    settings: -:
+      theme: "Default Blue"
+      notifications: true
+    :-
+    friends: -: "patrick", "Annie" :-
+    requests_in: -:
+    :-
+  :- :-
+Chats: -: -:
+    id: "Annie:patrick"
+    messages: -: -:
+        from: "patrick"
+        text: "Hey"
+      :-, -:
+        from: "Annie"
+        text: "How are you?"
+      :-, -:
+        from: "Annie"
+        text: "Where are you from anyways?"
+      :-, -:
+        from: "patrick"
+        text: "I am from the philippines"
+      :-, -:
+        from: "patrick"
+        text: "How about you?"
+      :-, -:
+        from: "patrick"
+        text: "I like you alot btw "
+      :-, -:
+        from: "Annie"
+        text: "I am from florida"
+      :-, -:
+        from: "Annie"
+        text: "i am fine thank you very much"
+      :-, -:
+        from: "Annie"
+        text: "and i like you too <3"
+      :-, -:
+        from: "patrick"
+        text: "wanna be my gf?"
+      :-, -:
+        from: "patrick"
+        text: "like fr?"
+      :-, -:
+        from: "Annie"
+        text: "I am from florida"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "really?"
+      :-, -:
+        from: "Annie"
+        text: "and i like you too <3"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "wow"
+      :-, -:
+        from: "Annie"
+        text: "Where are you from anyways?"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "I'm from the philippines"
+      :-, -:
+        from: "Annie"
+        text: "i am fine thank you very much"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "so like what are you doin?"
+      :-, -:
+        from: "Annie"
+        text: "I am from florida"
+        is_bot: true
+      :-, -:
+        from: "Annie"
+        text: "How are you?"
+      :-, -:
+        from: "patrick"
+        text: "ok? like i love  gay sex and shit"
+        is_bot: true
+      :-, -:
+        from: "Annie"
+        text: "wtf T_T"
+      :-, -:
+        from: "patrick"
+        text: "wanna be my gf?"
+        is_bot: true
+      :-, -:
+        from: "Annie"
+        text: "ok fine uWu"
+      :-, -:
+        from: "patrick"
+        text: "ok? like i love  gay sex and shit"
+        is_bot: true
+      :-, -:
+        from: "Annie"
+        text: "wtf are you talking about hahahaha"
+      :-, -:
+        from: "patrick"
+        text: "How about you?"
+        is_bot: true
+      :-, -:
+        from: "Annie"
+        text: "I love smothering dog saliva in my pussy"
+      :-, -:
+        from: "patrick"
+        text: "so like what are you doin?"
+        is_bot: true
+      :-, -:
+        from: "Annie"
+        text: "yess"
+      :-, -:
+        from: "patrick"
+        text: "like fr?"
+        is_bot: true
+      :-, -:
+        from: "Annie"
+        text: "yeahh uWu"
+      :-, -:
+        from: "patrick"
+        text: "I'm from the philippines"
+        is_bot: true
+      :-, -:
+        from: "Annie"
+        text: "and I'm from florida"
+      :-, -:
+        from: "patrick"
+        text: "Hey!"
+        is_bot: true
+      :-, -:
+        from: "Annie"
+        text: "Hello!"
+      :-, -:
+        from: "patrick"
+        text: "ok? like i love  gay sex and shit"
+        is_bot: true
+      :-, -:
+        from: "Annie"
+        text: "cool!"
+      :-, -:
+        from: "patrick"
+        text: "wanna be my gf?"
+        is_bot: true
+      :-, -:
+        from: "Annie"
+        text: "sure -w-"
+      :-, -:
+        from: "patrick"
+        text: "wanna be my gf?"
+        is_bot: true
+      :-, -:
+        from: "Annie"
+        text: "i already said yes"
+      :-, -:
+        from: "patrick"
+        text: "I am from the philippines"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "hi"
+      :-, -:
+        from: "Annie"
+        text: "Where are you from anyways?"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "i am from the philippines"
+      :-, -:
+        from: "Annie"
+        text: "i already said yes"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "ok?"
+      :-, -:
+        from: "Annie"
+        text: "Where are you from anyways?"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "Phillippines"
+      :-, -:
+        from: "Annie"
+        text: "yeahh uWu"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "wtf"
+      :-, -:
+        from: "Annie"
+        text: "Where are you from anyways?"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "-w-"
+      :-, -:
+        from: "Annie"
+        text: "Hello!"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "hey!"
+      :-, -:
+        from: "Annie"
+        text: "i am fine thank you very much"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "thats good,"
+      :-, -:
+        from: "Annie"
+        text: "yeahh uWu"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "so u good?"
+      :-, -:
+        from: "Annie"
+        text: "How are you?"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "im fine"
+      :-, -:
+        from: "Annie"
+        text: "I love smothering dog saliva in my pussy"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "wtf"
+      :-, -:
+        from: "Annie"
+        text: "I am from florida"
+        is_bot: true
+      :- :-
+  :-, -:
+    id: "Lanna:patrick"
+    messages: -: -:
+        from: "patrick"
+        text: "Hey!"
+      :-, -:
+        from: "Lanna"
+        text: "Omg how are you?, like im so fine fr fr"
+      :-, -:
+        from: "Lanna"
+        text: "Omg how are you?, like im so fine fr fr"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "i am good fam"
+      :-, -:
+        from: "Lanna"
+        text: "Omg how are you?, like im so fine fr fr"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "tf are you talking about?"
+      :-, -:
+        from: "Lanna"
+        text: " heyyy, i got wrecked last night like rawr XD"
+        is_bot: true
+      :-, -:
+        from: "patrick"
+        text: "ok? like i love  gay sex and shit"
+      :-, -:
+        from: "Lanna"
+        text: "Omg how are you?, like im so fine fr fr"
+        is_bot: true
+      :- :-
+  :-, -:
+    id: "Annie:Lanna"
+    messages: -: -:
+        from: "Annie"
+        text: "Heyy girll:p"
+      :-, -:
+        from: "Lanna"
+        text: " heyyy, i got wrecked last night like rawr XD"
+      :- :-
+  :- :-

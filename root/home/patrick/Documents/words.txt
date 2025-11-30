@@ -1,0 +1,9 @@
+Hello Reader!
+
+This Document entails how this folder is used.
+
+First: The Documents Folder is where all txt, docx, pdf's and other files are stored.
+
+Second: No Program files allowed here, That Goes to the scripts directory
+
+Third: Keep the sub-dir at a minimum to avoid clutter.

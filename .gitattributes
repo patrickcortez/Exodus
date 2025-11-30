@@ -1,0 +1,2 @@
+root/tools/data.img filter=lfs diff=lfs merge=lfs -text
+terminal.img filter=lfs diff=lfs merge=lfs -text

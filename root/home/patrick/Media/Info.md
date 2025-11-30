@@ -1,0 +1,5 @@
+- logged in :10/25/25:
+- git pushed :10/25/25:
+- exit       :10/25/25:
+- !error! o file not found! :10/26/25:
+- !error! sys files deleted! :10/26/25:

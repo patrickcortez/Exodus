@@ -1,0 +1,107 @@
+{
+  "Node-10": {
+    "path": "/home/cortez/push-test",
+    "author": "",
+    "desc": "",
+    "tag": "",
+    "current_version": "1.0"
+  },
+  "Tester": {
+    "path": "/home/cortez/OfficialTestSite",
+    "author": "",
+    "desc": "",
+    "tag": "",
+    "current_version": "1.1"
+  },
+  "site03": {
+    "path": "/home/cortez/newsite3",
+    "author": "",
+    "desc": "",
+    "tag": "",
+    "current_version": ""
+  },
+  "site02": {
+    "path": "/home/cortez/newsite2",
+    "author": "",
+    "desc": "",
+    "tag": "",
+    "current_version": ""
+  },
+  "site01": {
+    "path": "/home/cortez/newsite",
+    "author": "",
+    "desc": "",
+    "tag": "",
+    "current_version": ""
+  },
+  "site00": {
+    "path": "/home/cortez/newsite1",
+    "author": "",
+    "desc": "",
+    "tag": "",
+    "current_version": ""
+  },
+  "Site6": {
+    "path": "/home/cortez/Site6",
+    "author": "",
+    "desc": "",
+    "tag": "",
+    "current_version": "2.0"
+  },
+  "Site1": {
+    "path": "/home/cortez/TeztRun",
+    "author": "",
+    "desc": "",
+    "tag": "",
+    "current_version": ""
+  },
+  "Test": {
+    "path": "/home/cortez/Documents/Projects/Test-1",
+    "author": "Patrick Cortez",
+    "desc": "A test Node for Exodus",
+    "tag": "Experiment",
+    "current_version": "2.0"
+  },
+  "Main": {
+    "path": "/home/cortez/Documents/Projects/cortez-terminal",
+    "author": "Patrick Cortez",
+    "desc": "Main Future Thesis of Patrick Andrew Cortez",
+    "tag": "Important",
+    "current_version": "1.0"
+  },
+  "cave": {
+    "path": "/home/cortez/Documents/Projects/The_Cave",
+    "author": "",
+    "desc": "",
+    "tag": "",
+    "current_version": ""
+  },
+  "voice": {
+    "path": "/home/cortez/Documents/Projects/voice_worker",
+    "author": "",
+    "desc": "",
+    "tag": "",
+    "current_version": ""
+  },
+  "Site2": {
+    "path": "/home/cortez/Site2",
+    "author": "",
+    "desc": "",
+    "tag": "",
+    "current_version": "1.1"
+  },
+  "Site3": {
+    "path": "/home/cortez/Site3",
+    "author": "",
+    "desc": "",
+    "tag": "",
+    "current_version": ""
+  },
+  "Git1": {
+    "path": "/home/cortez/Gitsample",
+    "author": "Patrick Andrew Cortez",
+    "desc": "A Sample Git Repo",
+    "tag": "Experimental",
+    "current_version": "1.4"
+  }
+}

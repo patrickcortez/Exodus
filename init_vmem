@@ -1,0 +1,14 @@
+#!/bin/bash
+
+dd if=/dev/zero of=data.img bs=1M count=1024 ||{
+    echo "Failed to make Virtual Memory!"
+}
+
+mv data.img tools ||{
+    echo "Failed to move to tools folder!"
+}
+
+echo "process done!"
+
+
+

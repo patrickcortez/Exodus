@@ -1,0 +1,17 @@
+terminal.img
+root/tools/data.img
+venv
+deprecated
+.log
+.backup
+.extra
+Edits.txt
+"New File.txt"
+Sample.txt
+root/tools/Legit.enode
+root/tools/Test.node
+root/tools/Main.node
+cortez_drive.img
+cortez_drive.img.bak
+root/cortez_drive.img
+.agent

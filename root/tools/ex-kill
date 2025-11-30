@@ -1,0 +1,5 @@
+#!/bin/bash
+
+pkill -9 cloud_daemon
+pkill -9 query_daemon
+pkill -9 exodus-signal

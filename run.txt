@@ -1,0 +1,36 @@
+Compile Backend:
+gcc -O2 -Wall -o cortez_backend cortez_backend.c -lutil -lpthread
+
+Compile Frontend[Old]:
+gcc -O2 -Wall -o cortez_frontend_crt cortez_frontend.c -lSDL2 -lSDL2_ttf -lm
+
+Compile Frontend[New]:
+gcc -o cortez_frontend_crt cortez_frontend.c auth.c -lSDL2 -lSDL2_ttf -lSDL2_image -lSDL2_mixer -lmpg123 -lavformat -lavcodec -lswresample -lswscale -lavutil -lsodium -lm -pthread
+
+Compile Frontend[with mp3 support]:
+gcc -o cortez_frontend_crt cortez_frontend.c auth.c $(sdl2-config --cflags --libs) -lSDL2_ttf -lSDL2_image -lSDL2_mixer -lmpg123 -lavformat -lavcodec -lswresample -lswscale -lavutil -lsodium -lm -pthread
+
+Compile Netrunner: 
+gcc -o net-runner net_runner.c
+
+Compile crtz_lang.cpp:
+g++ -std=c++17 -Iinclude     src/crtz_lang.cpp src/ImageDriver.cpp     -o crtz_interpreter     -lSDL2 -lSDL2_image
+
+Compile IPC: 
+gcc -Wall -c cortez_ipc.c -o cortez_ipc.o -I../include
+
+compile exodus-gui:
+pyinstaller --onefile --noconsole --add-data "nodewatch.json:." exodus-gui.py
+
+Compile Tunnel: 
+
+make
+
+then Activate:
+
+sudo insmod cortez_tunnel.ko
+
+then Check:
+
+dmesg | tail
+ls -l /dev/cortez_tunnel

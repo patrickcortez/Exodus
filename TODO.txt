@@ -1,0 +1,9 @@
+status: 75% Done
+Stuff to work on:
+
+- Add Lan(Local Area Network) Node Distribution, Collaboration and Synchronization.
+
+- Optimize the entire product.
+- Test Portability
+- Replace the Kernel Module for a more userland one that doesnt require sudo.
+- So Implement Push,Pull and Clone.
