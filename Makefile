@@ -1,5 +1,3 @@
-
-
 # --- Compiler and Flags ---
 CC = gcc
 
@@ -17,15 +15,15 @@ SHR = shared
 
 #Headers
 
-INC = -Iinclude
+INC = -Iinclude -Ik-module
 INCL = include
 
 #External Dependencies
 
 CORTEZ_IPC_OBJ  = $(SHR)/cortez_ipc.o
 CORTEZ_MESH_OBJ = $(SHR)/cortez-mesh.o
-CTZ_JSON_LIB    = $(SHR)/ctz-json.a
-CTZ_SET = $(SHR)/ctz-set.a
+CTZ_JSON_LIB    = $(SHR)/ctz-json.o
+CTZ_SET = $(SHR)/ctz-set.o
 
 # --- Libraries ---
 LIBS_PTHREAD = -pthread
@@ -111,15 +109,20 @@ server: $(SRV_OUT)
 	$(CC) $(CFLAGS) $(SERVER) $(CTZ_JSON_LIB) -o $(STARGET) $(LIBS_PTHREAD) $(INC)
 
 #Compile Libraries
-lib: $(LIBRARIES)
+#Compile Libraries
+lib: $(SHR)/ctz-set.o $(SHR)/ctz-json.o $(SHR)/cortez-mesh.o $(SHR)/cortez_ipc.o
 
-	$(CC) -c $(SRC_DIR)/ctz-set.c -o $(SHR)/ctz-set.o $(CFL) $(INC)
+$(SHR)/ctz-set.o: $(SRC_DIR)/ctz-set.c
+	$(CC) -c $< -o $@ $(CFL) $(INC)
 
-	$(CC) -c $(SRC_DIR)/ctz-json.c -o $(SHR)/ctz-json.o $(CFL) $(INC)
+$(SHR)/ctz-json.o: $(SRC_DIR)/ctz-json.c
+	$(CC) -c $< -o $@ $(CFL) $(INC)
 
-	$(CC) -c $(SRC_DIR)/cortez-mesh.c -o $(SHR)/cortez-mesh.o $(CFL) $(INC)
+$(SHR)/cortez-mesh.o: $(SRC_DIR)/cortez-mesh.c
+	$(CC) -c $< -o $@ $(CFL) $(INC)
 
-	$(CC) -c $(SRC_DIR)/cortez-ipc.c -o $(SHR)/cortez_ipc.o $(CFL) $(INC)
+$(SHR)/cortez_ipc.o: $(SRC_DIR)/cortez_ipc.c
+	$(CC) -c $< -o $@ $(CFL) $(INC)
 
 
 $(SRV_OUT):
