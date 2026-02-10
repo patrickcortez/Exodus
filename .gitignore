@@ -1,2 +1,5 @@
 win-src
+bin
+build
+s-bin
 .vscode
