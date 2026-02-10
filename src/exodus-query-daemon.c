@@ -115,9 +115,11 @@ int main() {
         if ((msg_type >= MSG_UPLOAD_FILE && msg_type <= MSG_COMMIT_NODE) || 
             (msg_type >= MSG_NODE_MAN_CREATE && msg_type <= MSG_NODE_MAN_COPY) ||
             (msg_type >= MSG_SIG_REQUEST_UNIT_LIST && msg_type <= MSG_SIG_REQUEST_SYNC_NODE) ||
+            (msg_type >= MSG_SIG_REQUEST_UNIT_LIST && msg_type <= MSG_SIG_REQUEST_SYNC_NODE) ||
              msg_type == MSG_SIG_REQUEST_VIEW_CACHE || 
              msg_type == MSG_SIG_REQUEST_RESOLVE_UNIT ||
-             msg_type == MSG_SIG_RELOAD_CONFIG) {
+             msg_type == MSG_SIG_RELOAD_CONFIG ||
+             (msg_type == MSG_PING && sender_pid != cloud_daemon_pid)) {
             printf("[Query] Received request (type %d) from client %d. Forwarding to cloud daemon.\n", msg_type, sender_pid);
 
             PendingRequest* new_req = malloc(sizeof(PendingRequest));
@@ -191,12 +193,21 @@ int main() {
            msg_type == MSG_OPERATION_ACK || 
            msg_type == MSG_SIG_RESPONSE_UNIT_LIST || 
            msg_type == MSG_SIG_RESPONSE_VIEW_UNIT ||
+           msg_type == MSG_SIG_RESPONSE_VIEW_UNIT ||
            msg_type == MSG_SIG_RESPONSE_VIEW_CACHE || 
-           msg_type == MSG_SIG_RESPONSE_RESOLVE_UNIT) {
+           msg_type == MSG_SIG_RESPONSE_RESOLVE_UNIT ||
+           msg_type == MSG_PING) {
             if (sender_pid != cloud_daemon_pid) {
-                 printf("[Query] WARNING: Received a response from an unknown source (%d), ignoring.\n", sender_pid);
-                 cortez_mesh_msg_release(mesh, msg);
-                 continue;
+                 // Check if it's the cloud daemon with a new PID
+                 pid_t actual_cloud_pid = cortez_mesh_find_peer_by_name(mesh, CLOUD_DAEMON_NAME);
+                 if (actual_cloud_pid == sender_pid) {
+                     printf("[Query] Cloud daemon PID updated: %d -> %d\n", cloud_daemon_pid, sender_pid);
+                     cloud_daemon_pid = sender_pid;
+                 } else {
+                     printf("[Query] WARNING: Received a response from an unknown source (%d), ignoring.\n", sender_pid);
+                     cortez_mesh_msg_release(mesh, msg);
+                     continue;
+                 }
             }
             
             const void* wrapped_payload = cortez_msg_payload(msg);

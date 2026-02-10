@@ -85,6 +85,8 @@ enum exodus_msg_types {
     // Signal -> Cloud (Incoming data from other Units)
     MSG_SIG_SYNC_DATA = MESH_MSG_USER_START + 47, // Payload: sig_sync_data_t
 
+    MSG_PING = MESH_MSG_USER_START + 48, // Payload: arbitrary data (timestamp etc)
+
     MSG_SIG_REQUEST_RESOLVE_UNIT,
     MSG_SIG_RESPONSE_RESOLVE_UNIT,
 

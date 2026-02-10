@@ -2397,12 +2397,39 @@ int main() {
                 case MSG_SIG_SYNC_DATA:
                     handle_incoming_sync_data((const sig_sync_data_t*)cortez_msg_payload(msg));
                     break;
-                case MSG_SIG_STATUS_UPDATE:
-                    // TODO: Implement status update logic if needed
+                case MSG_SIG_STATUS_UPDATE: {
+                    const sig_status_update_t* status = (const sig_status_update_t*)cortez_msg_payload(msg);
+                    if (cortez_msg_payload_size(msg) == sizeof(sig_status_update_t)) {
+                        printf("[Cloud] Signal Status Update: %s to %s\n", 
+                               status->connected ? "Connected" : "Disconnected", 
+                               status->coordinator_url);
+                    }
                     break;
+                }
             }
             cortez_mesh_msg_release(mesh, msg);
             continue; // Skip rest of loop
+        }
+
+        if (msg_type == MSG_PING) {
+             printf("[Cloud] Received PING request from client %d\n", sender_pid);
+             // Echo back to sender (wrapper handles routing)
+             const void* wrapped_payload = cortez_msg_payload(msg);
+             uint32_t wrapped_payload_size = cortez_msg_payload_size(msg);
+             
+             // Extract request ID to send back proper wrapped response
+             if (wrapped_payload_size >= sizeof(uint64_t)) {
+                 uint64_t request_id;
+                 memcpy(&request_id, wrapped_payload, sizeof(uint64_t));
+                 
+                 // We just echo the payload back (excluding req id which send_wrapped_response_zc adds)
+                 const void* actual_payload = (const char*)wrapped_payload + sizeof(uint64_t);
+                 uint32_t actual_payload_size = wrapped_payload_size - sizeof(uint64_t);
+                 
+                 send_wrapped_response_zc(mesh, sender_pid, MSG_PING, request_id, actual_payload, actual_payload_size);
+             }
+             cortez_mesh_msg_release(mesh, msg);
+             continue;
         }
 
         if (msg_type == MSG_TERMINATE) {

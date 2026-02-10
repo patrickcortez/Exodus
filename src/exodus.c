@@ -3504,6 +3504,77 @@ int main(int argc, char* argv[]) {
             putchar(c);
         }
         fclose(f);
+    }else if (strcmp(argv[1], "ping") == 0) {
+        cortez_mesh_t* mesh = cortez_mesh_init("exodus_client", NULL);
+        if (!mesh) {
+            fprintf(stderr, "Could not connect to exodus mesh. Are daemons running?\n");
+            return 1;
+        }
+        pid_t target_pid = find_query_daemon_pid();
+        if (target_pid == 0) {
+            fprintf(stderr, "Could not find the query daemon.\n");
+            cortez_mesh_shutdown(mesh);
+            return 1;
+        }
+
+        int successes = 0;
+        int attempts = 5;
+        
+        for (int i = 0; i < attempts; i++) {
+            if (i > 0) printf("Retrying... (%d/%d)\n", i + 1, attempts);
+            uint32_t payload_size = sizeof(struct timespec); 
+            cortez_write_handle_t* h = cortez_mesh_begin_send_zc(mesh, target_pid, payload_size);
+            if(h) {
+                size_t part1_size;
+                struct timespec* ts = cortez_write_handle_get_part1(h, &part1_size);
+                clock_gettime(CLOCK_MONOTONIC, ts); // Send current time as payload
+                cortez_mesh_commit_send_zc(h, MSG_PING);
+                
+                // Wait for response
+                struct timespec deadline;
+                clock_gettime(CLOCK_MONOTONIC, &deadline);
+                deadline.tv_sec += 2; // 2 second deadline
+
+                while (1) {
+                    struct timespec now;
+                    clock_gettime(CLOCK_MONOTONIC, &now);
+                    if (now.tv_sec > deadline.tv_sec || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+                        break; // Timeout
+                    }
+                    
+                    long remaining_ms = (deadline.tv_sec - now.tv_sec) * 1000 + (deadline.tv_nsec - now.tv_nsec) / 1000000;
+                    if (remaining_ms < 0) remaining_ms = 0;
+
+                    cortez_msg_t* msg = cortez_mesh_read(mesh, remaining_ms); 
+                    if (msg) {
+                        if (cortez_msg_type(msg) == MSG_PING) {
+                            successes++;
+                            cortez_mesh_msg_release(mesh, msg);
+                            break; // Success for this attempt
+                        }
+                        // Ignore other messages (e.g. peer join/leave)
+                        cortez_mesh_msg_release(mesh, msg);
+                    } else {
+                        // Timeout
+                        break;
+                    }
+                }
+            }
+            sleep(1); // 1s between pings
+        }
+
+        if (successes > 0) {
+            printf("Exodus: Active\n");
+        } else {
+            printf("Exodus: Inactive\n");
+        }
+        
+        int percentage = (successes * 100) / attempts;
+        printf("State: %d%%\n", percentage);
+
+        cortez_mesh_shutdown(mesh);
+        return 0;
+
     }else if (strcmp(argv[1], "node-status") == 0) {
         if (argc != 3) {
             fprintf(stderr, "Usage: exodus node-status <node name>\n");
