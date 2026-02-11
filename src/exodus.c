@@ -40,6 +40,15 @@
 #include <sys/wait.h>
 #include <dirent.h>
 
+#include "autosuggest.h"
+#include "auto-nav.h"
+#include "signals.h"
+#include "child_handler.h"
+#include "interrupts.h"
+#include "utils.h"
+#include "kernel_repl.h"
+
+
 
 #define PID_FILE "/tmp/exodus.pid"
 
@@ -1194,28 +1203,14 @@ static void run_node_edit() {
         return;
     }
 
-    pid_t pid = fork();
-    if (pid == 0) { 
-
-        execl(gui_path, "exodus-tui", (char*)NULL);
-        
-        // If execl returns, an error occurred
-        perror("execl exodus-tui failed");
-        exit(1); 
+    char* args[] = { "exodus-tui", NULL };
+    printf("Launching Exodus TUI...\n");
     
-    } else if (pid < 0) {
-        // --- FORK ERROR ---
-        perror("fork for exodus-tui failed");
-        return;
+    int status = run_interactive_command(gui_path, args);
     
+    if (status != 0) {
+        printf("Exodus TUI exited with status %d.\n", status);
     } else {
-        // --- PARENT PROCESS ---
-        printf("Launching Exodus TUI... (PID: %d)\n", pid);
-        
-        // Wait for the child process (the TUI) to finish
-        int status;
-        waitpid(pid, &status, 0);
-        
         printf("Exodus TUI exited.\n");
     }
 }
@@ -1429,24 +1424,17 @@ static void run_node_conf(int argc, char* argv[]) {
     int i = 3;
     int auto_changed = 0; // Flag to track if --auto was specified
     int new_auto_val = 0;
-    int is_headless = 0; // Flag for systemd mode
+    int is_headless = 0; 
 
     while (i < argc) {
         if (strcmp(argv[i], "--auto") == 0) {
             if (i + 1 < argc) {
-                // --- Use strcmp, not atoi, to validate input ---
-                if (strcmp(argv[i + 1], "0") == 0) {
-                    snprintf(conf_auto, sizeof(conf_auto), "auto=0");
-                    printf("Setting auto=0\n");
+                if (strcmp(argv[i+1], "0") == 0 || strcmp(argv[i+1], "1") == 0) {
+                    snprintf(conf_auto, sizeof(conf_auto), "auto=%s", argv[i+1]);
+                    printf("Setting auto-surveillance to %s\n", argv[i+1]);
                     auto_changed = 1;
-                    new_auto_val = 0;
-                    i += 2; // Consume both
-                } else if (strcmp(argv[i + 1], "1") == 0) {
-                    snprintf(conf_auto, sizeof(conf_auto), "auto=1");
-                    printf("Setting auto=1\n");
-                    auto_changed = 1;
-                    new_auto_val = 1;
-                    i += 2; // Consume both
+                    new_auto_val = atoi(argv[i+1]);
+                    i += 2;
                 } else {
                     fprintf(stderr, "Error: --auto value must be 0 or 1. Got '%s'.\n", argv[i+1]);
                     i++; // Only consume '--auto'
@@ -2031,16 +2019,16 @@ static int confirm_overwrite(const char* label, const char* current_val, const c
 
 static void run_unit_set(int argc, char* argv[]) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: exodus unit-set <flag> [arguments...]\n");
-        fprintf(stderr, "  --name <New Unit Name>      Set this unit's display name\n");
-        fprintf(stderr, "  --desg <path/to/storage>    Set the designated folder for incoming Pushes\n");
-        fprintf(stderr, "  --coord <coord-name> <ip> <port>         Set the Coordinator address\n");
+        exodus_error("Usage: exodus unit-set <flag> [arguments...]");
+        exodus_error("  --name <New Unit Name>      Set this unit's display name");
+        exodus_error("  --desg <path/to/storage>    Set the designated folder for incoming Pushes");
+        exodus_error("  --coord <coord-name> <ip> <port>         Set the Coordinator address");
         return;
     }
 
     char exe_dir[PATH_MAX];
     if (get_executable_dir(exe_dir, sizeof(exe_dir)) != 0) {
-        fprintf(stderr, "Error: Could not determine executable directory.\n");
+        exodus_error("Could not determine executable directory.");
         return;
     }
 
@@ -2048,7 +2036,7 @@ static void run_unit_set(int argc, char* argv[]) {
     if (strcmp(argv[2], "--coord") == 0) {
         // Usage: --coord <Name> <IP> <Port>
         if (argc != 6) {
-            fprintf(stderr, "Usage: exodus unit-set --coord <Name> <IP> <Port>\n");
+            exodus_error("Usage: exodus unit-set --coord <Name> <IP> <Port>");
             return;
         }
         char* coord_name = argv[3];
@@ -2112,7 +2100,7 @@ static void run_unit_set(int argc, char* argv[]) {
 
     // 2. Process Changes
     if (strcmp(argv[2], "--name") == 0) {
-        if (argc != 4) { fprintf(stderr, "Usage: --name <name>\n"); set_free(config); return; }
+        if (argc != 4) { exodus_error("Usage: --name <name>"); set_free(config); return; }
         
         const char* current_name = set_get_string(config, "unit", "name", "My-Exodus-Unit");
         int result = confirm_overwrite("Unit Name", current_name, argv[3]);
@@ -2126,15 +2114,15 @@ static void run_unit_set(int argc, char* argv[]) {
         }
 
     } else if (strcmp(argv[2], "--desg") == 0 || strcmp(argv[2], "--desig") == 0) {
-        if (argc != 4) { fprintf(stderr, "Usage: --desg <path>\n"); set_free(config); return; }
+        if (argc != 4) { exodus_error("Usage: --desg <path>"); set_free(config); return; }
         
         char resolved_path[PATH_MAX];
         if (realpath(argv[3], resolved_path) == NULL) {
-            fprintf(stderr, "Warning: Path '%s' does not exist.\n", argv[3]);
+            exodus_error("Warning: Path '%s' does not exist.", argv[3]);
             if (argv[3][0] == '/') {
                  strncpy(resolved_path, argv[3], sizeof(resolved_path)-1);
             } else {
-                 fprintf(stderr, "Error: Please provide a valid, absolute path.\n");
+                 exodus_error("Please provide a valid, absolute path.");
                  set_free(config);
                  return;
             }
@@ -2152,7 +2140,7 @@ static void run_unit_set(int argc, char* argv[]) {
         }
 
     } else {
-        fprintf(stderr, "Unknown flag: %s\n", argv[2]);
+        exodus_error("Unknown flag: %s", argv[2]);
         set_free(config);
         return;
     }
@@ -2188,7 +2176,7 @@ static void run_view_unit(cortez_mesh_t* mesh, pid_t target_pid, const char* uni
     }
     
     if (!sent_ok) {
-        fprintf(stderr, "Failed to send VIEW_UNIT request.\n");
+        exodus_error("Failed to send VIEW_UNIT request.");
         return;
     }
 
@@ -2197,7 +2185,7 @@ static void run_view_unit(cortez_mesh_t* mesh, pid_t target_pid, const char* uni
     if (msg) {
         if (cortez_msg_type(msg) == MSG_SIG_RESPONSE_VIEW_UNIT) {
             if (cortez_msg_payload_size(msg) <= sizeof(uint64_t)) {
-                fprintf(stderr, "Received invalid (too small) response from daemon.\n");
+                exodus_error("Received invalid (too small) response from daemon.");
                 cortez_mesh_msg_release(mesh, msg);
                 return;
             }
@@ -2213,13 +2201,13 @@ static void run_view_unit(cortez_mesh_t* mesh, pid_t target_pid, const char* uni
                 }
                 ctz_json_free(root);
             } else {
-                 fprintf(stderr, "Received invalid JSON from daemon.\n");
+                 exodus_error("Received invalid JSON from daemon.");
             }
         } else if (cortez_msg_type(msg) == MSG_OPERATION_ACK) {
             const ack_t* ack = cortez_msg_payload(msg);
-            fprintf(stderr, "Error from daemon: %s\n", ack->details);
+            exodus_error("Error from daemon: %s", ack->details);
         } else {
-            fprintf(stderr, "Received unexpected response type: %d\n", cortez_msg_type(msg));
+            exodus_error("Received unexpected response type: %d", cortez_msg_type(msg));
         }
         cortez_mesh_msg_release(mesh, msg);
     } else {
@@ -2247,7 +2235,7 @@ static void run_push_node(cortez_mesh_t* mesh, pid_t target_pid, const char* nod
         usleep(100000);
     }
     
-    if(!sent_ok) { fprintf(stderr, "Failed to contact daemon.\n"); return; }
+    if(!sent_ok) { exodus_error("Failed to contact daemon."); return; }
 
     char target_ip[64] = {0};
     int target_port = 0;
@@ -2266,7 +2254,7 @@ static void run_push_node(cortez_mesh_t* mesh, pid_t target_pid, const char* nod
     }
 
     if(target_port == 0) {
-        fprintf(stderr, "Error: Unit '%s' not found or offline.\n", target_unit);
+        exodus_error("Unit '%s' not found or offline.", target_unit);
         return;
     }
 
@@ -2284,7 +2272,7 @@ static void run_push_node(cortez_mesh_t* mesh, pid_t target_pid, const char* nod
     // Create tar of the node directory
     snprintf(cmd, sizeof(cmd), "tar -cf \"%s\" -C \"%s\" .", tmp_file, node_path);
     if (system(cmd) != 0) {
-        fprintf(stderr, "Error: Failed to pack node data.\n");
+        exodus_error("Failed to pack node data.");
         return;
     }
 
@@ -2351,10 +2339,10 @@ static void run_push_node(cortez_mesh_t* mesh, pid_t target_pid, const char* nod
 static void run_sync_node(cortez_mesh_t* mesh, pid_t target_pid, 
                           const char* unit_name, const char* remote_node, const char* local_node) {
     
-    // 1. Find local node path
+// 1. Find local node path
     char local_node_path[PATH_MAX];
     if (find_node_path_in_config(local_node, local_node_path, sizeof(local_node_path)) != 0) {
-        fprintf(stderr, "Error: Local node '%s' not found in config.\n", local_node);
+        exodus_error("Local node '%s' not found in config.", local_node);
         return;
     }
     
@@ -2364,7 +2352,7 @@ static void run_sync_node(cortez_mesh_t* mesh, pid_t target_pid,
     char error_buf[256];
     ctz_json_value* history_json = ctz_json_load_file(local_history_path, error_buf, sizeof(error_buf));
     if (!history_json) {
-        fprintf(stderr, "Error: Could not read local history file: %s (%s)\n", local_history_path, error_buf);
+        exodus_error("Could not read local history file: %s (%s)", local_history_path, error_buf);
         history_json = ctz_json_new_array(); // Send empty history
     }
 
@@ -2421,7 +2409,7 @@ static void run_sync_node(cortez_mesh_t* mesh, pid_t target_pid,
     ctz_json_free(payload_obj); // Frees history_json, files_obj, and the *copies* of b64 strings
     
     if (!payload_json_string) {
-        fprintf(stderr, "Error: Failed to create final JSON payload.\n");
+        exodus_error("Failed to create final JSON payload.");
         return;
     }
 
@@ -2458,7 +2446,7 @@ static void run_sync_node(cortez_mesh_t* mesh, pid_t target_pid,
     free(req_header);
     
     if (!sent_ok) {
-        fprintf(stderr, "Failed to send SYNC_NODE request.\n");
+        exodus_error("Failed to send SYNC_NODE request.");
         return;
     }
 
@@ -2470,7 +2458,7 @@ static void run_sync_node(cortez_mesh_t* mesh, pid_t target_pid,
             const ack_t* ack = cortez_msg_payload(msg);
             printf("Result: %s (%s)\n", ack->success ? "Success" : "Failure", ack->details);
         } else {
-            fprintf(stderr, "Received unexpected response type: %d\n", cortez_msg_type(msg));
+            exodus_error("Received unexpected response type: %d", cortez_msg_type(msg));
         }
         cortez_mesh_msg_release(mesh, msg);
     } else {
@@ -2480,16 +2468,16 @@ static void run_sync_node(cortez_mesh_t* mesh, pid_t target_pid,
 
 static void run_unpack(int argc, char* argv[]) {
     if (argc != 3) {
-        fprintf(stderr, "Usage: exodus unpack <path/to/.enode file>\n");
+        exodus_error("Usage: exodus unpack <path/to/.enode file>");
         return;
     }
     char* node_file = argv[2];
-    if (access(node_file, F_OK) == -1) { fprintf(stderr, "Error: File not found: %s\n", node_file); return; }
+    if (access(node_file, F_OK) == -1) { exodus_error("File not found: %s", node_file); return; }
     
     char password_buffer[256]; // Create a local buffer
     char* password_ptr = getpass_custom("Enter decryption password: ");
     if (strlen(password_ptr) == 0) { 
-        fprintf(stderr, "Password cannot be empty. Aborting.\n"); 
+        exodus_error("Password cannot be empty. Aborting."); 
         return; 
     }
     // Copy the password into our local buffer
@@ -2505,10 +2493,10 @@ static void run_unpack(int argc, char* argv[]) {
 
     EnodeHeader header;
     if (fread(&header, sizeof(header), 1, f) != 1) {
-        fprintf(stderr, "Error: Could not read archive header.\n"); fclose(f); return;
+        exodus_error("Could not read archive header."); fclose(f); return;
     }
     if (memcmp(header.magic, ENODE_MAGIC, strlen(ENODE_MAGIC)) != 0) {
-    fprintf(stderr, "Error: Not a valid .enode file (magic mismatch).\n");
+    exodus_error("Not a valid .enode file (magic mismatch).");
     fclose(f);
     return;
     }
@@ -2524,14 +2512,14 @@ if (fstat(fileno(f), &st) != 0) {
 }
 
 if (st.st_size < (off_t)sizeof(EnodeHeader)) {
-    fprintf(stderr, "Error: File too small or corrupt.\n");
+    exodus_error("File too small or corrupt.");
     fclose(f);
     return;
 }
 
 size_t data_size = (size_t)(st.st_size - (off_t)sizeof(EnodeHeader));
 if (data_size == 0 || data_size % AES_BLOCKLEN != 0) {
-    fprintf(stderr, "Error: Corrupt file or wrong password (invalid length).\n");
+    exodus_error("Corrupt file or wrong password (invalid length).");
     fclose(f);
     return;
 }
@@ -2543,9 +2531,9 @@ if (fseek(f, (long)sizeof(EnodeHeader), SEEK_SET) != 0) {
     return;
 }
     uint8_t* data = malloc(data_size);
-    if (!data) { fprintf(stderr, "Out of memory.\n"); fclose(f); return; }
+    if (!data) { exodus_error("Out of memory."); fclose(f); return; }
     if (fread(data, 1, data_size, f) != data_size) {
-        fprintf(stderr, "Error reading encrypted data.\n"); free(data); fclose(f); return;
+        exodus_error("Error reading encrypted data."); free(data); fclose(f); return;
     }
     fclose(f);
 
@@ -2557,7 +2545,7 @@ if (fseek(f, (long)sizeof(EnodeHeader), SEEK_SET) != 0) {
     // Unpad
     size_t unpadded_size = pkcs7_unpad(data, data_size);
     if (unpadded_size == 0) {
-        fprintf(stderr, "Error: Wrong password or corrupt data (padding error).\n");
+        exodus_error("Wrong password or corrupt data (padding error).");
         free(data); return;
     }
 
@@ -2579,7 +2567,7 @@ if (fseek(f, (long)sizeof(EnodeHeader), SEEK_SET) != 0) {
         }
         
         if (end - ptr < sizeof(EnodeFileHeader)) {
-            fprintf(stderr, "Error: Ran out of data. Archive corrupt.\n");
+            exodus_error("Ran out of data. Archive corrupt.");
             break;
         }
 
@@ -2594,18 +2582,18 @@ if (fseek(f, (long)sizeof(EnodeHeader), SEEK_SET) != 0) {
         } else if (S_ISLNK(file_header->mode)) {
             unlink(file_header->relative_path); // Remove if it exists
             if (symlink(file_header->link_target, file_header->relative_path) != 0) {
-                fprintf(stderr, "  Warning: could not create symlink '%s' -> '%s'\n", file_header->relative_path, file_header->link_target);
+                printf("  Warning: could not create symlink '%s' -> '%s'\n", file_header->relative_path, file_header->link_target);
             }
         } else if (S_ISREG(file_header->mode)) {
             if (file_header->data_size > 0) {
                 if (ptr + file_header->data_size > end) {
-                    fprintf(stderr, "  Error: Incomplete file data. Archive corrupt.\n");
+                    exodus_error("Incomplete file data. Archive corrupt.");
                     break;
                 }
                 
                 FILE* out_file = fopen(file_header->relative_path, "wb");
                 if (!out_file) {
-                    fprintf(stderr, "  Error: Could not create file %s\n", file_header->relative_path);
+                    exodus_error("Could not create file %s", file_header->relative_path);
                     ptr += file_header->data_size; // Skip data
                     continue;
                 }
@@ -2628,7 +2616,7 @@ if (fseek(f, (long)sizeof(EnodeHeader), SEEK_SET) != 0) {
 // --- NEW: Self-contained send (client) function ---
 static void run_send(int argc, char* argv[]) {
     if (argc != 4) {
-        fprintf(stderr, "Usage: exodus send <path/to/.enode file> <http://ip:port>\n");
+        exodus_error("Usage: exodus send <path/to/.enode file> <http://ip:port>");
         return;
     }
     char* node_file = argv[2];
@@ -2643,13 +2631,13 @@ static void run_send(int argc, char* argv[]) {
     // Parse URL
     char* host = strstr(target_url, "://");
     if (!host) {
-        fprintf(stderr, "Error: Invalid URL format. Must be http://ip:port\n");
+        exodus_error("Invalid URL format. Must be http://ip:port");
         return;
     }
     host += 3; // Skip "://"
     char* port_str = strrchr(host, ':');
     if (!port_str) {
-        fprintf(stderr, "Error: Invalid URL format. Port is required.\n");
+        exodus_error("Invalid URL format. Port is required.");
         return;
     }
     
@@ -2684,7 +2672,7 @@ static void run_send(int argc, char* argv[]) {
     // Resolve host
     struct hostent* server = gethostbyname(host_copy);
     if (server == NULL) {
-        fprintf(stderr, "Error: Could not resolve host: %s\n", host_copy);
+        exodus_error("Could not resolve host: %s", host_copy);
         munmap(file_data, file_size);
         return;
     }
@@ -2742,7 +2730,7 @@ static void run_send(int argc, char* argv[]) {
                 if (strstr(resp_buf, "HTTP/1.1 200 OK")) {
                     printf("\nSuccessfully sent file.\n");
                 } else {
-                    fprintf(stderr, "\nServer responded with an error:\n%s\n", resp_buf);
+                    exodus_error("Server responded with an error:\n%s", resp_buf);
                 }
             } else {
                 perror("Error reading response from server");
@@ -2781,7 +2769,7 @@ static char* find_header_value(const char* request, const char* header_name) {
 // --- NEW: Self-contained expose-node (server) function ---
 static void run_expose_node(int argc, char* argv[]) {
     if (argc != 4) {
-        fprintf(stderr, "Usage: exodus expose-node <target_directory> <port>\n");
+        exodus_error("Usage: exodus expose-node <target_directory> <port>");
         return;
     }
     char* target_dir = argv[2];
@@ -2789,7 +2777,7 @@ static void run_expose_node(int argc, char* argv[]) {
 
     struct stat st_dir;
     if (stat(target_dir, &st_dir) != 0 || !S_ISDIR(st_dir.st_mode)) {
-        fprintf(stderr, "Error: Target directory '%s' does not exist or is not a directory.\n", target_dir);
+        exodus_error("Target directory '%s' does not exist or is not a directory.", target_dir);
         return;
     }
 
@@ -2820,7 +2808,7 @@ static void run_expose_node(int argc, char* argv[]) {
 
     char* http_buf = malloc(65536); // 64k buffer
     if (!http_buf) {
-        fprintf(stderr, "Failed to allocate buffer.\n");
+        exodus_error("Failed to allocate buffer.");
         close(server_fd); return;
     }
 
@@ -2849,7 +2837,7 @@ static void run_expose_node(int argc, char* argv[]) {
         }
 
         if (!body_ptr) {
-            fprintf(stderr, "Error: Failed to find request body.\n");
+            exodus_error("Failed to find request body.");
             close(client_sock); continue;
         }
 
@@ -2857,7 +2845,7 @@ static void run_expose_node(int argc, char* argv[]) {
         char* cl_str = find_header_value(http_buf, "Content-Length");
 
         if (!filename || !cl_str) {
-            fprintf(stderr, "Error: Missing X-Filename or Content-Length header.\n");
+            exodus_error("Missing X-Filename or Content-Length header.");
             const char* resp = "HTTP/1.1 400 Bad Request\r\n\r\nMissing headers.";
             write(client_sock, resp, strlen(resp));
             close(client_sock); continue;
@@ -2891,7 +2879,7 @@ static void run_expose_node(int argc, char* argv[]) {
         while (remaining_to_read > 0) {
             ssize_t n = read(client_sock, http_buf, (remaining_to_read > 65536) ? 65536 : remaining_to_read);
             if (n <= 0) {
-                fprintf(stderr, "Error: Connection closed before all data was received.\n");
+                exodus_error("Connection closed before all data was received.");
                 break;
             }
             fwrite(http_buf, 1, n, out_file);
@@ -2904,7 +2892,7 @@ static void run_expose_node(int argc, char* argv[]) {
             const char* resp = "HTTP/1.1 200 OK\r\n\r\nFile received.";
             write(client_sock, resp, strlen(resp));
         } else {
-             fprintf(stderr, "Error: File transfer incomplete.\n");
+             exodus_error("File transfer incomplete.");
         }
         close(client_sock);
     }
@@ -3030,9 +3018,261 @@ static void print_detailed_usage(void) {
     fprintf(stderr, "  %-12s List all coordinator profiles (active marked with *)\n", "coord-list");
     fprintf(stderr, "  %-12s Switch to a specific coordinator profile (Hot Reload)\n", "connect");
     fprintf(stderr, "\n");
+
+    fprintf(stderr, "Shell\n");
+    fprintf(stderr, "  %-12s Clear the terminal screen\n", "clear");
+    fprintf(stderr, "  %-12s Clear the terminal screen (shortcut)\n", "Ctrl+W");
+    fprintf(stderr, "\n");
 }
 
+// ============================================================================
+// BEGIN: INTERACTIVE SHELL (CPS TRAMPOLINE)
+// ============================================================================
+
+typedef struct TrampolineContext TrampolineContext;
+typedef void (*TrampolineFunc)(TrampolineContext*);
+
+struct TrampolineContext {
+    TrampolineFunc func;
+    int running;
+    char input_buffer[1024];
+    int argc;
+    char* argv[64];
+};
+
+static void shell_init(TrampolineContext* ctx);
+static void shell_loop(TrampolineContext* ctx);
+static void shell_dispatch(TrampolineContext* ctx);
+
+static void run_trampoline(TrampolineContext* ctx) {
+    while (ctx->running && ctx->func) {
+        ctx->func(ctx);
+    }
+}
+
+static void shell_init(TrampolineContext* ctx) {
+    excon_io_init();
+    printf("Exodus Interactive Shell v1.0\n");
+    printf("Type 'exit' or 'quit' to leave.\n\n\n");
+    ctx->running = 1;
+    ctx->func = shell_loop;
+}
+
+
+// --- Shell Mode ---
+
+// Keep track of previous directory to prevent redundant updates
+static char prev_cwd[PATH_MAX] = "";
+
+static void shell_loop(TrampolineContext* ctx) {
+    char cwd[PATH_MAX];
+    char prompt[PATH_MAX + 16];
+    char input_buffer[4096];
+
+    char exe_dir[PATH_MAX];
+    if (get_executable_dir(exe_dir, sizeof(exe_dir)) == 0) {
+        history_init(exe_dir);
+    }
+    
+    setup_signals();
+
+    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+        if (strcmp(cwd, prev_cwd) != 0) {
+             strncpy(prev_cwd, cwd, PATH_MAX);
+             prev_cwd[PATH_MAX - 1] = '\0';
+        }
+        
+        char display_path[PATH_MAX];
+        char* home = getenv("HOME");
+        if (home && strncmp(cwd, home, strlen(home)) == 0) {
+            snprintf(display_path, sizeof(display_path), "~%s", cwd + strlen(home));
+        } else {
+            strncpy(display_path, cwd, sizeof(display_path)-1);
+            display_path[PATH_MAX - 1] = '\0';
+        }
+        snprintf(prompt, sizeof(prompt), "\033[1;35mExodus\033[0m@\033[1;34m%s\033[0m: ", display_path);
+    } else {
+        snprintf(prompt, sizeof(prompt), "\033[1;35mExodus\033[0m@\033[1;34m???\033[0m: ");
+    }
+
+    int result = shell_read_line_robust(input_buffer, sizeof(input_buffer), prompt);
+    
+    if (result == -1) { // EOF
+        printf("\n");
+        ctx->running = 0;
+        ctx->func = NULL;
+        return;
+    }
+    
+    if (result == 1) { // Interrupted
+        ctx->func = shell_loop;
+        return;
+    }
+
+    if (strlen(input_buffer) == 0) {
+        ctx->func = shell_loop;
+        return;
+    }
+
+    // Copy to ctx->input_buffer
+    strncpy(ctx->input_buffer, input_buffer, sizeof(ctx->input_buffer) - 1);
+    ctx->input_buffer[sizeof(ctx->input_buffer) - 1] = '\0';
+
+    int conflict_matches = check_conflict(ctx->input_buffer);
+    int is_dir = (conflict_matches & 2);
+    int is_cmd = (conflict_matches & 1);
+
+    if (is_dir && is_cmd) {
+        int choice = shell_resolve_conflict(ctx->input_buffer);
+        if (choice == -1) {
+            ctx->func = shell_loop; 
+            return;
+        }
+        if (choice == 1) { 
+             if (chdir(ctx->input_buffer) != 0) {
+                perror("cd failed");
+             }
+             ctx->func = shell_loop;
+             return;
+        }
+    } else if (is_dir) {
+        if (chdir(ctx->input_buffer) != 0) {
+            perror("cd failed");
+        }
+        ctx->func = shell_loop;
+        return;
+    }
+
+    ctx->argc = 0;
+    char* token = strtok(ctx->input_buffer, " ");
+    while (token != NULL && ctx->argc < 63) {
+         ctx->argv[ctx->argc++] = token;
+         token = strtok(NULL, " ");
+    }
+    ctx->argv[ctx->argc] = NULL;
+
+    if (ctx->argc == 0) {
+         ctx->func = shell_loop;
+         return;
+    }
+    
+    shell_dispatch(ctx);
+    
+    if (ctx->running && ctx->func != NULL) {
+        ctx->func = shell_loop;
+    }
+}
+
+static void shell_dispatch(TrampolineContext* ctx) {
+    if (strcmp(ctx->argv[0], "exit") == 0 || strcmp(ctx->argv[0], "quit") == 0) {
+        ctx->running = 0;
+        ctx->func = NULL;
+        return;
+    }
+
+    if (strcmp(ctx->argv[0], "help") == 0) {
+        print_detailed_usage();
+        ctx->func = shell_loop;
+        return;
+    }
+
+    if (strcmp(ctx->argv[0], "clear") == 0) {
+        exodus_clear_screen();
+        ctx->func = shell_loop;
+        return;
+    }
+
+    if (strcmp(ctx->argv[0], "atomic") == 0) {
+        repl_state_t repl;
+        repl_init(&repl);
+        printf("\033[1;36mAtomic REPL\033[0m — Enter adds lines, [EXECUTE] runs the block, Ctrl+C cancels\n");
+        char line_buf[REPL_MAX_LINE_LEN];
+        while (1) {
+            const char *rprompt = repl.line_count == 0
+                ? "\033[1;33matomic\033[0m> "
+                : "   \033[90m|\033[0m ";
+            int rr = shell_read_line_robust(line_buf, sizeof(line_buf), rprompt);
+            if (rr == -1) {
+                printf("\n");
+                break;
+            }
+            if (rr == 1) {
+                repl_reset_block(&repl);
+                printf("\n\033[90m[block discarded]\033[0m\n");
+                continue;
+            }
+            size_t llen = strlen(line_buf);
+            while (llen > 0 && (line_buf[llen-1] == ' ' || line_buf[llen-1] == '\t'))
+                line_buf[--llen] = '\0';
+            if (strcmp(line_buf, "[EXECUTE]") == 0) {
+                if (repl.line_count == 0) {
+                    printf("\033[90m[empty block]\033[0m\n");
+                    continue;
+                }
+                printf("\033[90m--- executing %d line(s) ---\033[0m\n", repl.line_count);
+                repl_execute(&repl);
+                printf("\033[90m--- done ---\033[0m\n");
+                continue;
+            }
+            if (strcmp(line_buf, "exit") == 0 || strcmp(line_buf, "quit") == 0)
+                break;
+            if (llen > 0)
+                repl_add_line(&repl, line_buf);
+        }
+        ctx->func = shell_loop;
+        return;
+    }
+
+    if (!is_exodus_command(ctx->argv[0])) {
+        exodus_error("Unknown command: '%s'", ctx->argv[0]);
+        ctx->func = shell_loop;
+        return;
+    }
+
+    char* new_argv[65];
+    new_argv[0] = "exodus"; 
+    for(int i=0; i<ctx->argc; i++) {
+        new_argv[i+1] = ctx->argv[i];
+    }
+    new_argv[ctx->argc+1] = NULL;
+
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        char exe_path[PATH_MAX];
+        ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path)-1);
+        if (len != -1) {
+            exe_path[len] = '\0';
+            execv(exe_path, new_argv);
+            perror("execv failed");
+            exit(1);
+        } else {
+            perror("readlink self failed");
+            exit(1);
+        }
+    } else if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+    } else {
+        perror("fork failed");
+    }
+
+    ctx->func = shell_loop;
+}
+
+// ============================================================================
+// END: INTERACTIVE SHELL
+// ============================================================================
+
+
 int main(int argc, char* argv[]) {
+    if (argc == 1 || (argc == 2 && strcmp(argv[1], "--shell") == 0)) {
+        TrampolineContext ctx = {0};
+        shell_init(&ctx);
+        run_trampoline(&ctx);
+        return 0;
+    }
+
     if (argc < 2) {
         print_detailed_usage();
         return 1;
@@ -3144,7 +3384,7 @@ int main(int argc, char* argv[]) {
         if (find_node_path_in_config(node_name, node_path, sizeof(node_path)) != 0) return 1;
 
         if (strcmp(new_sub_name, "master") == 0) {
-            fprintf(stderr, "Error: Cannot create subsection 'master'. It is reserved.\n");
+            exodus_error("Cannot create subsection 'master'. It is reserved.");
             return 1;
         }
 
@@ -3157,12 +3397,12 @@ int main(int argc, char* argv[]) {
                                      CORTEZ_TYPE_STRING, new_sub_name, // arg1
                                      0);
         if (result != 0) {
-             fprintf(stderr, "Failed to start add-subs process.\n");
+             exodus_error("Failed to start add-subs process.");
         }
 
     }else if (strcmp(argv[1], "switch") == 0) {
         if (argc != 4) {
-            fprintf(stderr, "Usage: exodus switch <node_name> <subsection_name>\n");
+            exodus_error("Usage: exodus switch <node_name> <subsection_name>");
             return 1;
         }
         char* node_name = argv[2];
@@ -3175,8 +3415,8 @@ int main(int argc, char* argv[]) {
             char subsec_file_path[PATH_MAX];
             snprintf(subsec_file_path, sizeof(subsec_file_path), "%s/.log/subsections/%s.subsec", node_path, new_sub_name);
             if (access(subsec_file_path, F_OK) != 0) {
-                fprintf(stderr, "Error: Subsection '%s' does not exist.\n", new_sub_name);
-                fprintf(stderr, "Use 'exodus add-subs %s %s' to create it.\n", node_name, new_sub_name);
+                exodus_error("Subsection '%s' does not exist.", new_sub_name);
+                exodus_error("Use 'exodus add-subs %s %s' to create it.", node_name, new_sub_name);
                 return 1;
             }
         }
@@ -3498,7 +3738,8 @@ int main(int argc, char* argv[]) {
 
         printf("--- %s for Node '%s' (Subsection: '%s') ---\n", title, argv[2], subsection_name);
 
-        
+
+
         int c;
         while ((c = fgetc(f)) != EOF) {
             putchar(c);

@@ -293,27 +293,39 @@ void send_to_cloud(uint16_t msg_type, const void* payload, uint32_t size) {
 
 // Simple blocking HTTP request function
 int send_http_request(const char* host, int port, const char* request, char* response_buf, size_t response_size) {
-    struct hostent* server = gethostbyname(host);
-    if (server == NULL) {
-        log_msg("HTTP Error: Could not resolve host: %s", host);
+    struct addrinfo hints, *res, *p;
+    char port_str[16];
+    int status;
+    int sock_fd = -1;
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC; // AF_INET or AF_INET6 to force version
+    hints.ai_socktype = SOCK_STREAM;
+
+    snprintf(port_str, sizeof(port_str), "%d", port);
+
+    if ((status = getaddrinfo(host, port_str, &hints, &res)) != 0) {
+        log_msg("HTTP Error: getaddrinfo: %s", gai_strerror(status));
         return -1;
     }
 
-    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock_fd < 0) {
-        log_msg("HTTP Error: Could not create socket");
-        return -1;
+    for(p = res; p != NULL; p = p->ai_next) {
+        if ((sock_fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
+            continue;
+        }
+
+        if (connect(sock_fd, p->ai_addr, p->ai_addrlen) == -1) {
+            close(sock_fd);
+            continue;
+        }
+
+        break; // Success
     }
 
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
-    memcpy(&serv_addr.sin_addr.s_addr, server->h_addr, server->h_length);
+    freeaddrinfo(res); // Free the linked list
 
-    if (connect(sock_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
+    if (p == NULL) {
         log_msg("HTTP Error: Could not connect to %s:%d", host, port);
-        close(sock_fd);
         return -1;
     }
 

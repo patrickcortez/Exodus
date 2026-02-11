@@ -1,0 +1,12 @@
+/home/cortez/Documents/Projects/exodus/exodus-term/target/release/deps/drm_ffi-1eb7fd9802a8f274.d: /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/lib.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/utils.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/gem.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/ioctl.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/mode.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/syncobj.rs
+
+/home/cortez/Documents/Projects/exodus/exodus-term/target/release/deps/libdrm_ffi-1eb7fd9802a8f274.rlib: /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/lib.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/utils.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/gem.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/ioctl.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/mode.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/syncobj.rs
+
+/home/cortez/Documents/Projects/exodus/exodus-term/target/release/deps/libdrm_ffi-1eb7fd9802a8f274.rmeta: /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/lib.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/utils.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/gem.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/ioctl.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/mode.rs /home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/syncobj.rs
+
+/home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/lib.rs:
+/home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/utils.rs:
+/home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/gem.rs:
+/home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/ioctl.rs:
+/home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/mode.rs:
+/home/cortez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/drm-ffi-0.9.0/src/syncobj.rs:
