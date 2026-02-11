@@ -136,7 +136,7 @@ exodus commit node-name 1.0
 
   - upload:       Upload a file for word indexing
   - find:         Find a word in the last indexed file
-  - change:       Find and replace a word in the last indexed file
+  - change:       Find and replace a word in the last indexed file   | fn ls path
   - wc:           Get the word count of the last indexed file
   - wl:           Get the line count of the last indexed file
   - cc:           Get the non-space character count of the last indexed file
@@ -192,7 +192,211 @@ exodus commit node-name 1.0
 
 - enode File: A Encrypted File that can be sent to other exodus users.
 
+---
 
+## Atomic — Kernel REPL
+
+**Atomic** is a built-in kernel-facing REPL that provides direct access to Linux syscalls through a scripting environment. It runs inside the Exodus shell and renders through the kernel console subsystem (`exodus-term`).
+
+### Entering the REPL
+
+```bash
+# From the exodus shell
+atomic
+```
+
+You'll see the `atomic>` prompt. Type lines of code, then type `[EXECUTE]` on a new line to run the block. Press `Ctrl+C` to cancel.
+
+### Syntax
+
+#### Variables & Literals
+
+```bash
+var x = 42
+var addr = 0xDEADBEEF
+var mask = 0b1101
+var msg = "hello world"
+var active = true
+var empty = null
+```
+
+Supported literal types:
+| Type | Example | Description |
+|------|---------|-------------|
+| Decimal | `42`, `-1` | Signed integers |
+| Hex | `0xFF`, `0xDEAD` | Memory addresses, flags, masks |
+| Binary | `0b1010` | Bit patterns |
+| String | `"hello"` | Text data |
+| Boolean | `true`, `false` | Maps to `1` / `0` |
+
+Reference variables with `$name`:
+```bash
+var fd = sys-open "/tmp/test" O_RDONLY
+sys-print $fd
+```
+
+#### Conditionals
+
+```bash
+if $fd >= 0
+  sys-print "opened"
+  sys-close $fd
+else if $fd == -2
+  sys-print "not found"
+else
+  sys-print "error"
+end
+```
+
+Operators: `==`, `!=`, `>`, `<`, `>=`, `<=`. Nesting is supported.
+
+#### Functions
+
+```bash
+fn open_and_read path
+  var fd = sys-open $path O_RDONLY
+  if $fd >= 0
+    var data = sys-read $fd 256
+    sys-print $data
+    sys-close $fd
+  else
+    print "cannot open:" $path
+  end
+end
+
+open_and_read "/etc/hostname"
+open_and_read "/proc/version"
+[EXECUTE]
+```
+
+Functions support parameters and local variable scoping.
+
+#### Comments & Print
+
+```bash
+# This is a comment
+print "Hello from Atomic"
+```
+
+### Syscall Commands (44)
+
+#### File Operations
+| Command | Usage |
+|---------|-------|
+| `sys-open` | `sys-open <path> <flags> [mode]` |
+| `sys-read` | `sys-read <fd> <count>` |
+| `sys-write` | `sys-write <fd> <data>` |
+| `sys-close` | `sys-close <fd>` |
+| `sys-lseek` | `sys-lseek <fd> <offset> <whence>` |
+| `sys-truncate` | `sys-truncate <path> <length>` |
+| `sys-dup2` | `sys-dup2 <oldfd> <newfd>` |
+| `sys-pipe` | `sys-pipe` (returns read/write fds) |
+| `sys-ioctl` | `sys-ioctl <fd> <req> [arg]` |
+
+Flags: `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, `O_APPEND`. Whence: `SEEK_SET`, `SEEK_CUR`, `SEEK_END`.
+
+#### File System
+| Command | Usage |
+|---------|-------|
+| `sys-stat` | `sys-stat <path>` |
+| `sys-getdents` | `sys-getdents <fd>` (raw dirent buffer) |
+| `sys-getcwd` | `sys-getcwd` |
+| `sys-chdir` | `sys-chdir <path>` |
+| `sys-mkdir` | `sys-mkdir <path> [mode]` |
+| `sys-unlink` | `sys-unlink <path>` |
+| `sys-rename` | `sys-rename <old> <new>` |
+| `sys-chmod` | `sys-chmod <path> <mode>` |
+| `sys-chown` | `sys-chown <path> <uid> <gid>` |
+| `sys-link` | `sys-link <target> <linkname>` |
+| `sys-symlink` | `sys-symlink <target> <linkname>` |
+| `sys-readlink` | `sys-readlink <path>` |
+| `sys-mount` | `sys-mount <src> <tgt> <fs> <flags>` |
+| `sys-umount` | `sys-umount <target>` |
+
+#### Process Management
+| Command | Usage |
+|---------|-------|
+| `sys-fork` | `sys-fork` |
+| `sys-kill` | `sys-kill <pid> <signal>` |
+| `sys-wait` | `sys-wait <pid>` |
+| `sys-getpid` | `sys-getpid` |
+| `sys-getuid` | `sys-getuid` |
+| `sys-nice` | `sys-nice <inc>` |
+
+Signals: `SIGTERM`, `SIGKILL`, `SIGINT`, `SIGHUP`, `SIGUSR1`, `SIGUSR2`.
+
+#### Memory
+| Command | Usage |
+|---------|-------|
+| `sys-mmap` | `sys-mmap <len> <prot> <flags> <fd> [offset]` |
+| `sys-munmap` | `sys-munmap <addr> <len>` |
+| `sys-brk` | `sys-brk [addr]` |
+
+Prot: `PROT_READ`, `PROT_WRITE`, `PROT_EXEC`. Flags: `MAP_SHARED`, `MAP_PRIVATE`, `MAP_ANON`.
+
+#### Networking
+| Command | Usage |
+|---------|-------|
+| `sys-socket` | `sys-socket <domain> <type> <proto>` |
+| `sys-connect` | `sys-connect <fd> <ip> <port>` |
+| `sys-bind` | `sys-bind <fd> <ip> <port>` |
+| `sys-listen` | `sys-listen <fd> <backlog>` |
+| `sys-accept` | `sys-accept <fd>` |
+| `sys-send` | `sys-send <fd> <data>` |
+| `sys-recv` | `sys-recv <fd> <len>` |
+
+Domain: `AF_INET`, `AF_INET6`, `AF_UNIX`. Type: `SOCK_STREAM`, `SOCK_DGRAM`.
+
+#### System Info
+| Command | Usage |
+|---------|-------|
+| `sys-uname` | `sys-uname` |
+| `sys-sysinfo` | `sys-sysinfo` |
+
+#### Utilities
+| Command | Usage | Description |
+|---------|-------|-------------|
+| `#` | `# comment` | Comment line (ignored). |
+
+### Example: Full Script
+
+```bash
+atomic
+
+# Check if a file exists, create it if not
+fn ensure_file path
+  var fd = sys-open $path O_RDONLY
+  if $fd >= 0
+    sys-write 1 "exists: "
+    sys-write 1 $path
+    sys-write 1 "\n"
+    sys-close $fd
+  else
+    var fd2 = sys-open $path O_WRONLY|O_CREAT|O_TRUNC 0644
+    sys-write $fd2 "created by atomic"
+    sys-close $fd2
+    sys-write 1 "created: "
+    sys-write 1 $path
+    sys-write 1 "\n"
+  end
+end
+
+ensure_file "/tmp/atomic_test.txt"
+
+# Read it back
+var fd = sys-open "/tmp/atomic_test.txt" O_RDONLY
+var content = sys-read $fd 256
+sys-write 1 $content
+sys-write 1 "\n"
+sys-close $fd
+
+# Show system info
+sys-uname
+sys-sysinfo
+[EXECUTE]
+```
+
+---
 
 ## Developer: 
 

@@ -15,8 +15,8 @@
 #include <sys/utsname.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <signal.h>
-#include <dirent.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -202,27 +202,85 @@ static repl_value_t cmd_sys_readlink(int argc, char **argv) {
     return make_string(buf, (int)n);
 }
 
-static repl_value_t cmd_sys_list_dir(int argc, char **argv) {
-    if (argc < 2) return make_string("[error] usage: sys-list-dir <path>", -1);
-    DIR *d = opendir(argv[1]);
-    if (!d) return make_error("opendir");
+struct linux_dirent64 {
+    unsigned long long d_ino;
+    long long          d_off;
+    unsigned short     d_reclen;
+    unsigned char      d_type;
+    char               d_name[];
+};
+
+static repl_value_t cmd_sys_getdents(int argc, char **argv) {
+    if (argc < 2) return make_string("[error] usage: sys-getdents <fd>", -1);
+    int fd = (int)strtol(argv[1], NULL, 0);
+    char buf[4096];
+    long nread = syscall(SYS_getdents64, fd, buf, sizeof(buf));
+    if (nread < 0) return make_error("getdents64");
 
     repl_value_t r;
     memset(&r, 0, sizeof(r));
     r.type = VAL_STRING;
     r.str_len = 0;
 
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
-        int remaining = REPL_MAX_VAR_VALUE - r.str_len - 2;
-        if (remaining <= 0) break;
-        int written = snprintf(r.str_val + r.str_len, (size_t)remaining, "%s%s",
-                               r.str_len > 0 ? "\n" : "", ent->d_name);
-        if (written > 0) r.str_len += written;
+    long pos = 0;
+    while (pos < nread) {
+        struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
+        if (strcmp(d->d_name, ".") != 0 && strcmp(d->d_name, "..") != 0) {
+            int remaining = REPL_MAX_VAR_VALUE - r.str_len - 2;
+            if (remaining <= 0) break;
+            int written = snprintf(r.str_val + r.str_len, (size_t)remaining, "%s%s",
+                                   r.str_len > 0 ? "\n" : "", d->d_name);
+            if (written > 0) r.str_len += written;
+        }
+        pos += d->d_reclen;
     }
-    closedir(d);
     return r;
+}
+
+static repl_value_t cmd_sys_brk(int argc, char **argv) {
+    void *addr = NULL;
+    if (argc >= 2)
+        addr = (void *)(uintptr_t)strtol(argv[1], NULL, 0);
+    void *result = (void *)syscall(SYS_brk, addr);
+    repl_value_t r;
+    memset(&r, 0, sizeof(r));
+    r.type = VAL_INT;
+    r.int_val = (long)(uintptr_t)result;
+    snprintf(r.str_val, sizeof(r.str_val), "0x%lx", (unsigned long)(uintptr_t)result);
+    r.str_len = (int)strlen(r.str_val);
+    return r;
+}
+
+static repl_value_t cmd_sys_pipe(int argc, char **argv) {
+    (void)argc; (void)argv;
+    int pipefd[2];
+    if (pipe(pipefd) < 0) return make_error("pipe");
+    repl_value_t r;
+    memset(&r, 0, sizeof(r));
+    r.type = VAL_STRING;
+    r.str_len = snprintf(r.str_val, sizeof(r.str_val), "read=%d write=%d", pipefd[0], pipefd[1]);
+    r.int_val = pipefd[0];
+    return r;
+}
+
+static repl_value_t cmd_sys_dup2(int argc, char **argv) {
+    if (argc < 3) return make_string("[error] usage: sys-dup2 <oldfd> <newfd>", -1);
+    int oldfd = (int)strtol(argv[1], NULL, 0);
+    int newfd = (int)strtol(argv[2], NULL, 0);
+    int ret = dup2(oldfd, newfd);
+    return make_status(ret, "dup2");
+}
+
+static repl_value_t cmd_sys_getcwd(int argc, char **argv) {
+    (void)argc; (void)argv;
+    char buf[4096];
+    if (!getcwd(buf, sizeof(buf))) return make_error("getcwd");
+    return make_string(buf, -1);
+}
+
+static repl_value_t cmd_sys_chdir(int argc, char **argv) {
+    if (argc < 2) return make_string("[error] usage: sys-chdir <path>", -1);
+    return make_status(chdir(argv[1]), "chdir");
 }
 
 static repl_value_t cmd_sys_fork(int argc, char **argv) {
@@ -419,156 +477,13 @@ static repl_value_t cmd_sys_umount(int argc, char **argv) {
     return make_status(umount(argv[1]), "umount");
 }
 
-static repl_value_t cmd_sys_print(int argc, char **argv) {
-    repl_value_t r;
-    memset(&r, 0, sizeof(r));
-    r.type = VAL_STRING;
-    r.str_len = 0;
-    for (int i = 1; i < argc; i++) {
-        int remaining = REPL_MAX_VAR_VALUE - r.str_len - 1;
-        if (remaining <= 0) break;
-        int written = snprintf(r.str_val + r.str_len, (size_t)remaining, "%s%s",
-                               i > 1 ? " " : "", argv[i]);
-        if (written > 0) r.str_len += written;
-    }
-    printf("%s\n", r.str_val);
-    return r;
-}
-
-static repl_value_t cmd_sys_hex(int argc, char **argv) {
-    if (argc < 2) return make_string("[error] usage: sys-hex <data>", -1);
-    repl_value_t r;
-    memset(&r, 0, sizeof(r));
-    r.type = VAL_STRING;
-    r.str_len = 0;
-    const char *data = argv[1];
-    int len = (int)strlen(data);
-    for (int i = 0; i < len && r.str_len < REPL_MAX_VAR_VALUE - 4; i++) {
-        r.str_len += snprintf(r.str_val + r.str_len,
-                              (size_t)(REPL_MAX_VAR_VALUE - r.str_len),
-                              "%02x ", (unsigned char)data[i]);
-    }
-    printf("%s\n", r.str_val);
-    return r;
-}
-
-static repl_value_t cmd_sys_filter(int argc, char **argv) {
-    if (argc < 3) return make_string("[error] usage: sys-filter <data> <pattern>", -1);
-    repl_value_t r;
-    memset(&r, 0, sizeof(r));
-    r.type = VAL_STRING;
-    r.str_len = 0;
-
-    char input[REPL_MAX_VAR_VALUE];
-    strncpy(input, argv[1], sizeof(input) - 1);
-    input[sizeof(input) - 1] = '\0';
-
-    char *line = strtok(input, "\n");
-    while (line) {
-        if (strstr(line, argv[2])) {
-            int remaining = REPL_MAX_VAR_VALUE - r.str_len - 2;
-            if (remaining <= 0) break;
-            int written = snprintf(r.str_val + r.str_len, (size_t)remaining, "%s%s",
-                                   r.str_len > 0 ? "\n" : "", line);
-            if (written > 0) r.str_len += written;
-        }
-        line = strtok(NULL, "\n");
-    }
-    return r;
-}
-
-static repl_value_t cmd_sys_count(int argc, char **argv) {
-    if (argc < 2) return make_int(0);
-    int count = 0;
-    const char *p = argv[1];
-    if (*p) count = 1;
-    while (*p) {
-        if (*p == '\n') count++;
-        p++;
-    }
-    return make_int(count);
-}
-
-static repl_value_t cmd_fds(int argc, char **argv) {
-    (void)argc; (void)argv;
-    repl_value_t r;
-    memset(&r, 0, sizeof(r));
-    r.type = VAL_STRING;
-    r.str_len = 0;
-
-    DIR *d = opendir("/proc/self/fd");
-    if (!d) return make_error("opendir(/proc/self/fd)");
-
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
-        char link_path[64];
-        char target[256];
-        snprintf(link_path, sizeof(link_path), "/proc/self/fd/%s", ent->d_name);
-        ssize_t n = readlink(link_path, target, sizeof(target) - 1);
-        if (n > 0) {
-            target[n] = '\0';
-            int remaining = REPL_MAX_VAR_VALUE - r.str_len - 2;
-            if (remaining <= 0) break;
-            int written = snprintf(r.str_val + r.str_len, (size_t)remaining,
-                                   "%sfd %s -> %s", r.str_len > 0 ? "\n" : "",
-                                   ent->d_name, target);
-            if (written > 0) r.str_len += written;
-        }
-    }
-    closedir(d);
-    printf("%s\n", r.str_val);
-    return r;
-}
-
-static repl_value_t cmd_maps(int argc, char **argv) {
-    (void)argc; (void)argv;
-    repl_value_t r;
-    memset(&r, 0, sizeof(r));
-    r.type = VAL_STRING;
-
-    FILE *f = fopen("/proc/self/maps", "r");
-    if (!f) return make_error("fopen(/proc/self/maps)");
-
-    r.str_len = (int)fread(r.str_val, 1, REPL_MAX_VAR_VALUE - 1, f);
-    r.str_val[r.str_len] = '\0';
-    fclose(f);
-    printf("%s", r.str_val);
-    return r;
-}
-
-static repl_value_t cmd_env(int argc, char **argv) {
-    if (argc >= 3) {
-        setenv(argv[1], argv[2], 1);
-        return make_string(argv[2], -1);
-    }
-    if (argc == 2) {
-        char *val = getenv(argv[1]);
-        if (!val) return make_string("(unset)", -1);
-        return make_string(val, -1);
-    }
-    extern char **environ;
-    repl_value_t r;
-    memset(&r, 0, sizeof(r));
-    r.type = VAL_STRING;
-    r.str_len = 0;
-    for (int i = 0; environ[i] && r.str_len < REPL_MAX_VAR_VALUE - 2; i++) {
-        int remaining = REPL_MAX_VAR_VALUE - r.str_len - 2;
-        int written = snprintf(r.str_val + r.str_len, (size_t)remaining, "%s%s",
-                               r.str_len > 0 ? "\n" : "", environ[i]);
-        if (written > 0) r.str_len += written;
-    }
-    printf("%s\n", r.str_val);
-    return r;
-}
-
 static syscall_cmd_entry_t cmd_table[] = {
     {"sys-open",      cmd_sys_open},
     {"sys-read",      cmd_sys_read},
     {"sys-write",     cmd_sys_write},
     {"sys-close",     cmd_sys_close},
     {"sys-stat",      cmd_sys_stat},
-    {"sys-list-dir",  cmd_sys_list_dir},
+    {"sys-getdents",  cmd_sys_getdents},
     {"sys-mkdir",     cmd_sys_mkdir},
     {"sys-unlink",    cmd_sys_unlink},
     {"sys-rename",    cmd_sys_rename},
@@ -587,6 +502,11 @@ static syscall_cmd_entry_t cmd_table[] = {
     {"sys-nice",      cmd_sys_nice},
     {"sys-mmap",      cmd_sys_mmap},
     {"sys-munmap",    cmd_sys_munmap},
+    {"sys-brk",       cmd_sys_brk},
+    {"sys-pipe",      cmd_sys_pipe},
+    {"sys-dup2",      cmd_sys_dup2},
+    {"sys-getcwd",    cmd_sys_getcwd},
+    {"sys-chdir",     cmd_sys_chdir},
     {"sys-socket",    cmd_sys_socket},
     {"sys-connect",   cmd_sys_connect},
     {"sys-bind",      cmd_sys_bind},
@@ -599,13 +519,6 @@ static syscall_cmd_entry_t cmd_table[] = {
     {"sys-uname",     cmd_sys_uname},
     {"sys-mount",     cmd_sys_mount},
     {"sys-umount",    cmd_sys_umount},
-    {"sys-print",     cmd_sys_print},
-    {"sys-hex",       cmd_sys_hex},
-    {"sys-filter",    cmd_sys_filter},
-    {"sys-count",     cmd_sys_count},
-    {"fds",           cmd_fds},
-    {"maps",          cmd_maps},
-    {"env",           cmd_env},
     {NULL, NULL}
 };
 

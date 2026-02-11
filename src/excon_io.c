@@ -132,6 +132,23 @@ int excon_io_write_str(const char *str) {
     return excon_io_write(str, (int)strlen(str));
 }
 
+int excon_io_get_size(int *rows, int *cols) {
+    if (excon_fd < 0) return -1;
+    excon_create_t sz;
+    if (ioctl(excon_fd, EXCON_GET_SIZE, &sz) < 0) return -1;
+    if (rows) *rows = sz.rows;
+    if (cols) *cols = sz.cols;
+    return 0;
+}
+
+int excon_io_set_cursor(int row, int col) {
+    if (excon_fd < 0) return -1;
+    excon_cursor_t cur;
+    cur.row = (uint16_t)row;
+    cur.col = (uint16_t)col;
+    return ioctl(excon_fd, EXCON_SET_CURSOR, &cur);
+}
+
 int excon_io_read_input(char *buf, int bufsize) {
     if (excon_fd < 0)
         return -1;

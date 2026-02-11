@@ -100,15 +100,15 @@ static struct termios orig_termios;
 static int is_orig_termios_set = 0;
 
 void shell_disable_raw_mode(void) {
+    if (excon_io_active()) return;
     if (is_orig_termios_set && tcsetattr(STDIN_FILENO, TCSADRAIN, &orig_termios) == -1) {
-        // die("tcsetattr");
     }
 }
 
 void shell_enable_raw_mode(void) {
+    if (excon_io_active()) return;
     if (!is_orig_termios_set) {
         if (tcgetattr(STDIN_FILENO, &orig_termios) == -1) {
-            // die("tcgetattr");
         }
         atexit(shell_disable_raw_mode);
         is_orig_termios_set = 1;
@@ -124,11 +124,14 @@ void shell_enable_raw_mode(void) {
     raw.c_cc[VTIME] = 0; 
     
     if (tcsetattr(STDIN_FILENO, TCSADRAIN, &raw) == -1) {
-        // die("tcsetattr");
     }
 }
 
 static int get_window_size(int *rows, int *cols) {
+    if (excon_io_active()) {
+        if (excon_io_get_size(rows, cols) == 0)
+            return 0;
+    }
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
         *cols = ws.ws_col;
@@ -170,11 +173,45 @@ static void handle_winch(int sig) {
 }
 
 static void refresh_line(const char* prompt, const char* buf, size_t len, size_t cursor_pos, int selection_active, const char* suggestion, int* last_cursor_row) {
+    (void)suggestion;
+    (void)selection_active;
     char sbuf[64];
     int cols, rows;
     get_window_size(&rows, &cols);
 
-    // 1. Move to Prompt Start
+    if (excon_io_active()) {
+        static size_t prev_content_len = 0;
+        size_t plen = get_visible_length(prompt);
+
+        shell_write("\r", 1);
+
+        shell_write(prompt, (int)strlen(prompt));
+        shell_write(buf, (int)len);
+
+        size_t current_content_len = plen + len;
+        int pad = 0;
+        if (prev_content_len > current_content_len)
+            pad = (int)(prev_content_len - current_content_len);
+        pad += 2;
+        char spaces[128];
+        memset(spaces, ' ', sizeof(spaces));
+        if (pad > 0)
+            shell_write(spaces, pad > 128 ? 128 : pad);
+        prev_content_len = current_content_len;
+
+        int go_back = (int)len + pad - (int)cursor_pos;
+        char backs[256];
+        memset(backs, '\b', sizeof(backs));
+        while (go_back > 0) {
+            int chunk = go_back > 256 ? 256 : go_back;
+            shell_write(backs, chunk);
+            go_back -= chunk;
+        }
+
+        *last_cursor_row = 0;
+        return;
+    }
+
     if (*last_cursor_row > 0) {
         snprintf(sbuf, sizeof(sbuf), "\033[%dA", *last_cursor_row);
         (void)shell_write(sbuf, (int)strlen(sbuf));
@@ -182,19 +219,11 @@ static void refresh_line(const char* prompt, const char* buf, size_t len, size_t
     (void)shell_write("\r", 1);
     (void)shell_write("\033[J", 3);
     
-    // 2. Print Content
     (void)shell_write(prompt, (int)strlen(prompt));
     if (selection_active) (void)shell_write("\033[7m", 4);
     (void)shell_write(buf, (int)len);
     if (selection_active) (void)shell_write("\033[0m", 4);
-    
-    if (suggestion && strlen(suggestion) > 0) {
-        (void)shell_write("\033[90m", 5);
-        (void)shell_write(suggestion, (int)strlen(suggestion));
-        (void)shell_write("\033[0m", 4);
-    }
-    
-    // 3. Calculate Geometry via Simulation
+
     int cur_col = 0;
     int cur_row = 0;
     int cursor_target_row = 0;
@@ -202,7 +231,6 @@ static void refresh_line(const char* prompt, const char* buf, size_t len, size_t
     
     size_t prompt_len = get_visible_length(prompt);
     
-    // Simulate Prompt
     for (size_t i = 0; i < prompt_len; i++) {
         if (cur_col >= cols) {
             cur_col = 0;
@@ -211,13 +239,6 @@ static void refresh_line(const char* prompt, const char* buf, size_t len, size_t
         cur_col++;
     }
     
-    // Simulate Buffer + Suggestion
-    size_t content_len = len;
-    if (suggestion) content_len += strlen(suggestion);
-    
-    // We need to iterate 'buf' then 'suggestion' separately to handle newlines
-    
-    // Buffer
     for (size_t i = 0; i < len; i++) {
         if (i == cursor_pos) {
             cursor_target_row = cur_row;
@@ -240,36 +261,14 @@ static void refresh_line(const char* prompt, const char* buf, size_t len, size_t
         cursor_target_col = cur_col;
     }
 
-    // Suggestion (Simple append check)
-    if (suggestion) {
-        size_t slen = strlen(suggestion);
-        for (size_t i = 0; i < slen; i++) {
-            if (suggestion[i] == '\n') {
-                 cur_col = 0;
-                 cur_row++;
-            } else {
-                if (cur_col >= cols) {
-                    cur_col = 0;
-                    cur_row++;
-                }
-                cur_col++;
-            }
-        }
-    }
-
     int total_rows = cur_row;
 
-    // 4. Move Cursor to End (Relative)
-    // We just printed everything, so we are at 'total_rows', 'cur_col' (visibly)
-    // Move back to Start of Prompt (Row 0)
-    
-     if (total_rows > 0) {
+    if (total_rows > 0) {
          snprintf(sbuf, sizeof(sbuf), "\033[%dA", total_rows);
          (void)shell_write(sbuf, (int)strlen(sbuf));
     }
     (void)shell_write("\r", 1);
     
-    // 5. Move to Target
     if (cursor_target_row > 0) {
         snprintf(sbuf, sizeof(sbuf), "\033[%dB", cursor_target_row);
         (void)shell_write(sbuf, (int)strlen(sbuf));
@@ -427,12 +426,7 @@ int shell_read_line_robust(char* buf, size_t size, const char* prompt) {
                 len--;
                 buf[len] = '\0';
                 cursor_pos--;
-                if (cursor_pos == len) {
-                     const char* last = get_last_token(buf);
-                     scan_token_for_suggestion(last, suggestion, sizeof(suggestion));
-                } else {
-                    suggestion[0] = '\0';
-                }
+                suggestion[0] = '\0';
                 refresh_line(prompt, buf, len, cursor_pos, 0, suggestion, &last_cursor_row);
             }
             continue;
@@ -568,14 +562,18 @@ int shell_read_line_robust(char* buf, size_t size, const char* prompt) {
             buf[cursor_pos] = '\0';
             len = cursor_pos;
             suggestion[0] = '\0';
-            const char* last = get_last_token(buf);
-            scan_token_for_suggestion(last, suggestion, sizeof(suggestion));
             refresh_line(prompt, buf, len, cursor_pos, 0, suggestion, &last_cursor_row);
             continue;
         }
 
         if (c == 12) {
-            shell_write("\033[H\033[J", 6);
+            if (excon_io_active()) {
+                int fd = excon_io_get_fd();
+                if (fd >= 0) ioctl(fd, _IO('E', 2));
+                last_cursor_row = 0;
+            } else {
+                shell_write("\033[H\033[J", 6);
+            }
             refresh_line(prompt, buf, len, cursor_pos, 0, suggestion, &last_cursor_row);
             continue;
         }
@@ -602,8 +600,7 @@ int shell_read_line_robust(char* buf, size_t size, const char* prompt) {
                 len++;
                 buf[len] = '\0';
                 cursor_pos++;
-                const char* last = get_last_token(buf);
-                scan_token_for_suggestion(last, suggestion, sizeof(suggestion));
+                suggestion[0] = '\0';
             } else {
                 memmove(&buf[cursor_pos + 1], &buf[cursor_pos], len - cursor_pos);
                 buf[cursor_pos] = c;

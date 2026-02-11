@@ -3090,9 +3090,9 @@ static void shell_loop(TrampolineContext* ctx) {
             strncpy(display_path, cwd, sizeof(display_path)-1);
             display_path[PATH_MAX - 1] = '\0';
         }
-        snprintf(prompt, sizeof(prompt), "\033[1;35mExodus\033[0m@\033[1;34m%s\033[0m: ", display_path);
+        snprintf(prompt, sizeof(prompt), "Exodus@%s: ", display_path);
     } else {
-        snprintf(prompt, sizeof(prompt), "\033[1;35mExodus\033[0m@\033[1;34m???\033[0m: ");
+        snprintf(prompt, sizeof(prompt), "Exodus@???: ");
     }
 
     int result = shell_read_line_robust(input_buffer, sizeof(input_buffer), prompt);
@@ -3185,12 +3185,12 @@ static void shell_dispatch(TrampolineContext* ctx) {
     if (strcmp(ctx->argv[0], "atomic") == 0) {
         repl_state_t repl;
         repl_init(&repl);
-        printf("\033[1;36mAtomic REPL\033[0m — Enter adds lines, [EXECUTE] runs the block, Ctrl+C cancels\n");
+        printf("Atomic REPL — Enter adds lines, [EXECUTE] runs the block, Ctrl+C cancels\n");
         char line_buf[REPL_MAX_LINE_LEN];
         while (1) {
             const char *rprompt = repl.line_count == 0
-                ? "\033[1;33matomic\033[0m> "
-                : "   \033[90m|\033[0m ";
+                ? "atomic> "
+                : "   | ";
             int rr = shell_read_line_robust(line_buf, sizeof(line_buf), rprompt);
             if (rr == -1) {
                 printf("\n");
@@ -3273,9 +3273,20 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
+    // Check for script execution directly from arguments
+    if (argc == 2) {
+        size_t len = strlen(argv[1]);
+        if (len > 5 && strcmp(argv[1] + len - 5, ".atom") == 0) {
+            repl_run_script(argv[1]);
+            return 0;
+        }
+    }
+
     if (argc < 2) {
-        print_detailed_usage();
-        return 1;
+        TrampolineContext shell_ctx;
+        shell_init(&shell_ctx);
+        run_trampoline(&shell_ctx);
+        return 0;
     }
 
     if (strcmp(argv[1], "start") == 0) {

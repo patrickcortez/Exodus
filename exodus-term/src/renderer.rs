@@ -38,11 +38,13 @@ impl Renderer {
         for row in 0..rows {
             for col in 0..cols {
                 let cell: ExconCell = console.cell(row, col);
+                // Direct rendering, no ANSI stripping
+                let char_code = cell.ch;
+                let bold = cell.attr & ATTR_BOLD != 0; 
 
                 let fg_idx = (cell.attr & ATTR_FG_MASK) as usize;
                 let bg_idx = ((cell.attr & ATTR_BG_MASK) >> ATTR_BG_SHIFT) as usize;
-                let bold = cell.attr & ATTR_BOLD != 0;
-
+                
                 let (fr, fg, fb) = if bold {
                     BRIGHT_COLOR_TABLE[fg_idx % 8]
                 } else {
@@ -54,7 +56,7 @@ impl Renderer {
                     && header.cursor_row == row
                     && header.cursor_col == col;
 
-                let glyph = self.font.rasterize(cell.ch, bold);
+                let glyph = self.font.rasterize(char_code, bold);
 
                 let px = col as u32 * cw;
                 let py = row as u32 * ch;

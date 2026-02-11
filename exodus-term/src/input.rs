@@ -19,6 +19,7 @@ pub fn translate_key(key: &Key, state: ElementState, modifiers_ctrl: bool) -> Op
     match key {
         Key::Character(ch) => Some(ch.as_bytes().to_vec()),
         Key::Named(named) => match named {
+            NamedKey::Space => Some(vec![b' ']),
             NamedKey::Enter => Some(vec![b'\n']),
             NamedKey::Backspace => Some(vec![0x7f]),
             NamedKey::Tab => Some(vec![b'\t']),

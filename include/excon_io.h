@@ -11,5 +11,7 @@ int excon_io_get_fd(void);
 
 int shell_write(const char *data, int len);
 int shell_read_byte(char *c);
+int excon_io_get_size(int *rows, int *cols);
+int excon_io_set_cursor(int row, int col);
 
 #endif

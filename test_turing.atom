@@ -1,0 +1,50 @@
+# Test Turing Completeness
+
+# 1. Arithmetic & While Loop (Factorial Iterative)
+var n = 5
+var res = 1
+while $n > 0
+  var res = $res * $n
+  var n = $n - 1
+end
+sys-write 1 "Factorial of 5 (iterative): "
+sys-write 1 $res
+sys-write 1 "\n"
+
+# 2. String Comparison
+var s1 = "hello"
+var s2 = "hello"
+if $s1 == $s2
+  sys-write 1 "Strings match!\n"
+else
+  sys-write 1 "Strings do not match.\n"
+end
+
+var s3 = "foo"
+if $s1 != $s3
+  sys-write 1 "Strings differ!\n"
+else
+  sys-write 1 "Strings fail.\n"
+end
+
+# 3. Recursion (Factorial Recursive) with Scope Check
+# We use output to verify flow because return values aren't supported directly
+fn fact x
+  sys-write 1 "Enter fact: "
+  sys-write 1 $x
+  sys-write 1 "\n"
+  
+  if $x <= 1
+    sys-write 1 "Base case reached\n"
+  else
+    var prev = $x - 1
+    fact $prev
+    sys-write 1 "Return to "
+    sys-write 1 $x
+    sys-write 1 "\n"
+  end
+end
+
+sys-write 1 "Testing Recursion Scope (3):\n"
+fact 3
+[EXECUTE]
