@@ -1,4 +1,5 @@
 /* gcc -Wall -Wextra -O2 -c syscall_commands.c -o syscall_commands.o -Iinclude */
+#include <ctype.h>
 #include "syscall_commands.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -327,10 +328,12 @@ static repl_value_t cmd_sys_mmap(int argc, char **argv) {
     if (strstr(argv[2], "PROT_READ"))  prot |= PROT_READ;
     if (strstr(argv[2], "PROT_WRITE")) prot |= PROT_WRITE;
     if (strstr(argv[2], "PROT_EXEC"))  prot |= PROT_EXEC;
+    if (prot == 0 && isdigit(argv[2][0])) prot = (int)strtol(argv[2], NULL, 0);
     int flags_val = 0;
     if (strstr(argv[3], "MAP_SHARED"))  flags_val |= MAP_SHARED;
     if (strstr(argv[3], "MAP_PRIVATE")) flags_val |= MAP_PRIVATE;
     if (strstr(argv[3], "MAP_ANON"))    flags_val |= MAP_ANONYMOUS;
+    if (flags_val == 0 && isdigit(argv[3][0])) flags_val = (int)strtol(argv[3], NULL, 0);
     int fd = (int)strtol(argv[4], NULL, 0);
     off_t offset = argc > 5 ? (off_t)strtol(argv[5], NULL, 0) : 0;
     void *ptr = mmap(NULL, length, prot, flags_val, fd, offset);

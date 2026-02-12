@@ -9,6 +9,7 @@
 #define REPL_MAX_FUNCS       32
 #define REPL_MAX_FUNC_PARAMS 8
 #define REPL_MAX_FUNC_LINES  128
+#define REPL_MAX_LOG_SIZE    16384
 
 typedef enum {
     VAL_NONE,
@@ -54,6 +55,8 @@ typedef struct {
     int          func_count;
     repl_value_t last_return;
     int          scope_start;
+    char         log_buffer[REPL_MAX_LOG_SIZE];
+    int          log_len;
 } repl_state_t;
 
 void repl_init(repl_state_t *state);

@@ -429,6 +429,10 @@ Signals: `SIGTERM`, `SIGKILL`, `SIGINT`, `SIGHUP`, `SIGUSR1`, `SIGUSR2`.
 | `sys-mmap` | `sys-mmap <len> <prot> <flags> <fd> [offset]` |
 | `sys-munmap` | `sys-munmap <addr> <len>` |
 | `sys-brk` | `sys-brk [addr]` |
+| `mem-write` | `mem-write <addr> <type> <val>` |
+| `mem-read` | `mem-read <addr> <type>` |
+
+Types: `u8`, `u16`, `u32`, `u64`.
 
 Prot: `PROT_READ`, `PROT_WRITE`, `PROT_EXEC`. Flags: `MAP_SHARED`, `MAP_PRIVATE`, `MAP_ANON`.
 

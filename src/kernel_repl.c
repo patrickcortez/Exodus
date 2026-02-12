@@ -6,8 +6,15 @@
 #include <string.h>
 #include <ctype.h>
 
-static int execute_line(repl_state_t *state, const char *raw_line);
+static int execute_line(repl_state_t *state, const char *raw_line, int line_num);
+#include <ctype.h>
+#include <stdint.h>
+#include <stddef.h>
+
+static int execute_line(repl_state_t *state, const char *raw_line, int line_num);
 static int check_keyword(const char *line, const char *kw);
+static void cmd_mem_write(repl_state_t *state, char **tokens, int count);
+static long cmd_mem_read(repl_state_t *state, char **tokens, int count);
 
 void repl_init(repl_state_t *state) {
     memset(state, 0, sizeof(repl_state_t));
@@ -16,6 +23,8 @@ void repl_init(repl_state_t *state) {
     state->in_block = 0;
     state->func_count = 0;
     state->scope_start = 0;
+    state->log_len = 0;
+    state->log_buffer[0] = '\0';
 }
 
 void repl_reset_block(repl_state_t *state) {
@@ -113,7 +122,7 @@ static char *expand_variables(repl_state_t *state, const char *input, char *outp
             
             memset(&state->last_return, 0, sizeof(state->last_return));
             
-            execute_line(state, cmd_buf);
+            execute_line(state, cmd_buf, 0);
             
             if (state->last_return.type == VAL_INT) {
                 int written = snprintf(output + oi, (size_t)(outsize - oi), "%ld", state->last_return.int_val);
@@ -167,6 +176,26 @@ static char *expand_variables(repl_state_t *state, const char *input, char *outp
     return output;
 }
 
+static void unescape_string(char *dest, const char *src) {
+    while (*src) {
+        if (*src == '\\' && *(src+1)) {
+            src++;
+            switch (*src) {
+                case 'n': *dest++ = '\n'; break;
+                case 't': *dest++ = '\t'; break;
+                case 'r': *dest++ = '\r'; break;
+                case '"': *dest++ = '"'; break;
+                case '\\': *dest++ = '\\'; break;
+                default: *dest++ = '\\'; *dest++ = *src; break;
+            }
+        } else {
+            *dest++ = *src;
+        }
+        src++;
+    }
+    *dest = '\0';
+}
+
 static int tokenize_line(char *line, char **tokens, int max_tokens) {
     int count = 0;
     char *p = line;
@@ -179,7 +208,11 @@ static int tokenize_line(char *line, char **tokens, int max_tokens) {
             p++;
             tokens[count++] = p;
             while (*p && *p != '"') p++;
-            if (*p == '"') *p++ = '\0';
+            if (*p == '"') {
+                *p = '\0'; // Terminate first
+                unescape_string(tokens[count-1], tokens[count-1]); // Unescape in-place
+                p++;
+            }
         } else {
             tokens[count++] = p;
             while (*p && !isspace((unsigned char)*p)) p++;
@@ -188,6 +221,8 @@ static int tokenize_line(char *line, char **tokens, int max_tokens) {
     }
     return count;
 }
+
+
 
 static int parse_literal(const char *token, repl_value_t *val) {
     if (!token || !*token) return 0;
@@ -199,9 +234,11 @@ static int parse_literal(const char *token, repl_value_t *val) {
         const char *src = token + 1;
         size_t slen = tlen - 1;
         if (slen >= REPL_MAX_VAR_VALUE) slen = REPL_MAX_VAR_VALUE - 1;
-        memcpy(val->str_val, src, slen);
-        val->str_val[slen] = '\0';
-        val->str_len = (int)slen;
+        char temp[REPL_MAX_VAR_VALUE];
+        memcpy(temp, src, slen);
+        temp[slen] = '\0';
+        unescape_string(val->str_val, temp);
+        val->str_len = (int)strlen(val->str_val);
         return 1;
     }
 
@@ -279,9 +316,11 @@ static int try_parse_string_literal(const char *raw_rhs, repl_value_t *val) {
     size_t slen = (size_t)(end - start);
     if (slen >= REPL_MAX_VAR_VALUE) slen = REPL_MAX_VAR_VALUE - 1;
     val->type = VAL_STRING;
-    memcpy(val->str_val, start, slen);
-    val->str_val[slen] = '\0';
-    val->str_len = (int)slen;
+    char temp[REPL_MAX_VAR_VALUE];
+    memcpy(temp, start, slen);
+    temp[slen] = '\0';
+    unescape_string(val->str_val, temp);
+    val->str_len = (int)strlen(val->str_val);
     return 1;
 }
 
@@ -386,7 +425,7 @@ static int eval_condition(repl_state_t *state, char **tokens, int count) {
     return 0;
 }
 
-static int execute_line(repl_state_t *state, const char *raw_line) {
+static int execute_line(repl_state_t *state, const char *raw_line, int line_num) {
     while (*raw_line && isspace((unsigned char)*raw_line)) raw_line++;
     if (!*raw_line || raw_line[0] == '#') return 0;
 
@@ -446,6 +485,19 @@ static int execute_line(repl_state_t *state, const char *raw_line) {
     int count = tokenize_line(work, tokens, 64);
     if (count == 0)
         return 0;
+
+    if (strcmp(tokens[0], "mem-write") == 0) {
+        cmd_mem_write(state, tokens, count);
+        return 0;
+    }
+    
+    if (strcmp(tokens[0], "mem-read") == 0) {
+        state->last_return.type = VAL_INT;
+        state->last_return.int_val = cmd_mem_read(state, tokens, count);
+        snprintf(state->last_return.str_val, sizeof(state->last_return.str_val), "%ld", state->last_return.int_val);
+        state->last_return.str_len = (int)strlen(state->last_return.str_val);
+        return REPL_RET; // Return value for assignment
+    }
 
 
 
@@ -529,10 +581,26 @@ static int execute_line(repl_state_t *state, const char *raw_line) {
         if (is_var_assign) {
             set_var(state, var_name, result);
         } else {
+            state->last_return = result;
             if (result.type == VAL_INT) {
-                printf("%ld\n", result.int_val);
+                if (line_num > 0) {
+                    char temp[256];
+                    int n = snprintf(temp, sizeof(temp), "==> [%d] [Return: %ld]\n", line_num, result.int_val);
+                    if (state->log_len + n < REPL_MAX_LOG_SIZE - 1) {
+                         strcat(state->log_buffer, temp);
+                         state->log_len += n;
+                    }
+                }else{}
             } else if (result.type == VAL_STRING && result.str_len > 0) {
-                printf("%s\n", result.str_val);
+                if (line_num > 0) {
+                     char temp[REPL_MAX_VAR_VALUE + 64];
+                     // Truncate string if too long for log?
+                     int n = snprintf(temp, sizeof(temp), "==> [%d] [Return: \"%s\"]\n", line_num, result.str_val);
+                     if (state->log_len + n < REPL_MAX_LOG_SIZE - 1) {
+                         strcat(state->log_buffer, temp);
+                         state->log_len += n;
+                     }
+                }
             }
         }
         return 0;
@@ -572,6 +640,60 @@ static int find_matching_end(char lines[][REPL_MAX_LINE_LEN], int start, int tot
         }
     }
     return total;
+}
+
+static void cmd_mem_write(repl_state_t *state, char **tokens, int count) {
+    if (count < 4) {
+        fprintf(stderr, "[repl] usage: mem-write <addr> <type> <value>\n");
+        return;
+    }
+    
+    // Resolve address
+    long addr_val = resolve_value(state, tokens[1]);
+    if (addr_val == 0) return;
+    
+    // Resolve value
+    long val = resolve_value(state, tokens[3]);
+    
+    void *ptr = (void *)(uintptr_t)addr_val;
+    
+    if (strcmp(tokens[2], "u8") == 0) {
+        *(uint8_t *)ptr = (uint8_t)val;
+    } else if (strcmp(tokens[2], "u16") == 0) {
+        *(uint16_t *)ptr = (uint16_t)val;
+    } else if (strcmp(tokens[2], "u32") == 0) {
+        *(uint32_t *)ptr = (uint32_t)val;
+    } else if (strcmp(tokens[2], "u64") == 0) {
+        *(uint64_t *)ptr = (uint64_t)val;
+    } else {
+        fprintf(stderr, "[repl] unknown type for mem-write: %s\n", tokens[2]);
+    }
+}
+
+static long cmd_mem_read(repl_state_t *state, char **tokens, int count) {
+    if (count < 3) {
+        fprintf(stderr, "[repl] usage: mem-read <addr> <type>\n");
+        return 0;
+    }
+
+    long addr_val = resolve_value(state, tokens[1]);
+    if (addr_val == 0) return 0;
+
+    void *ptr = (void *)(uintptr_t)addr_val;
+    long ret = 0;
+
+    if (strcmp(tokens[2], "u8") == 0) {
+        ret = *(uint8_t *)ptr;
+    } else if (strcmp(tokens[2], "u16") == 0) {
+        ret = *(uint16_t *)ptr;
+    } else if (strcmp(tokens[2], "u32") == 0) {
+        ret = *(uint32_t *)ptr;
+    } else if (strcmp(tokens[2], "u64") == 0) {
+        ret = (long)*(uint64_t *)ptr;
+    } else {
+        fprintf(stderr, "[repl] unknown type for mem-read: %s\n", tokens[2]);
+    }
+    return ret;
 }
 
 static int execute_block(repl_state_t *state, char lines[][REPL_MAX_LINE_LEN], int start, int end);
@@ -769,7 +891,7 @@ static int execute_block(repl_state_t *state, char lines[][REPL_MAX_LINE_LEN], i
             continue;
         }
 
-        int res = execute_line(state, lines[i]);
+        int res = execute_line(state, lines[i], i + 1);
         if (res == REPL_RET) return REPL_RET;
         if (res < 0)
             errors++;
@@ -781,6 +903,13 @@ static int execute_block(repl_state_t *state, char lines[][REPL_MAX_LINE_LEN], i
 
 int repl_execute(repl_state_t *state) {
     int errors = execute_block(state, state->lines, 0, state->line_count);
+    
+    if (state->log_len > 0) {
+        printf("---[Log:]\n%s", state->log_buffer);
+        state->log_len = 0;
+        state->log_buffer[0] = '\0';
+    }
+
     repl_reset_block(state);
     return errors;
 }

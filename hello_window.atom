@@ -1,0 +1,88 @@
+# Hello Window Script (Framebuffer)
+# Usage: ./bin/exodus hello_window.atom
+
+# 1. Open Framebuffer
+# O_RDWR = 2
+var fd = $(sys-open "/dev/fb0" 2)
+if $fd < 0
+  sys-write 1 "Error: Could not open /dev/fb0. Are you root?\n"
+  # We don't have exit, so we just stop processing useful logic
+  return 1
+end
+
+sys-write 1 "Opened framebuffer: "
+sys-write 1 $fd
+sys-write 1 "\n"
+
+# 2. Map Framebuffer
+# sys-mmap <length> <prot> <flags> <fd> <offset>
+# Length: 1920 * 1080 * 4 = 8294400 (approx 8MB)
+# PROT_READ|PROT_WRITE = 3
+# MAP_SHARED = 1
+var fb_addr = $(sys-mmap 8294400 3 1 $fd 0)
+
+if $fb_addr == -1
+  sys-write 1 "Error: mmap failed\n"
+  sys-close $fd
+  return 1
+end
+
+sys-write 1 "Framebuffer mapped at: "
+sys-write 1 $fb_addr
+sys-write 1 "\n"
+
+# 3. Draw a Window
+# Configuration
+var width = 1920
+var height = 1080
+var win_x = 100
+var win_y = 100
+var win_w = 400
+var win_h = 300
+var border_color = 0xFF0000FF  # Blue (ARGB)
+var bg_color = 0xFFFFFFFF      # White (ARGB)
+
+sys-write 1 "Drawing window...\n"
+
+var y = 0
+while $y < $win_h
+  var x = 0
+  while $x < $win_w
+    # Calculate offset: (win_y + y) * width + (win_x + x) * 4
+    # offset = ((win_y + y) * width + (win_x + x)) * 4
+    
+    var abs_y = $win_y + $y
+    var abs_x = $win_x + $x
+    
+    var pixel_idx = $abs_y * $width
+    var pixel_idx = $pixel_idx + $abs_x
+    var offset = $pixel_idx * 4
+    
+    var addr = $fb_addr + $offset
+    
+    # Determine color (Border or Background)
+    var color = $bg_color
+    if $y < 5
+      var color = $border_color
+    else if $y > $win_h - 5
+      var color = $border_color
+    else if $x < 5
+      var color = $border_color
+    else if $x > $win_w - 5
+      var color = $border_color
+    end
+    
+    mem-write $addr u32 $color
+    
+    var x = $x + 1
+  end
+  var y = $y + 1
+end
+
+sys-write 1 "Window drawn!\n"
+
+# Cleanup
+# sys-munmap <addr> <length>
+sys-munmap $fb_addr 8294400
+sys-close $fd
+[EXECUTE]
