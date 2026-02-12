@@ -1,0 +1,31 @@
+# Test Return Values
+
+fn recursive_fib n
+  if $n <= 1
+    return $n
+  end
+
+  var n1 = $n - 1
+  var n2 = $n - 2
+
+  var f1 = $(recursive_fib $n1)
+  var f2 = $(recursive_fib $n2)
+  
+  return $f1 + $f2
+end
+
+sys-write 1 "Testing recursive fib(3)...\n"
+var fib3 = $(recursive_fib 3)
+sys-write 1 "Fib(3): ["
+sys-write 1 $fib3
+sys-write 1 "]\n"
+
+if $fib3 == 2
+  sys-write 1 "SUCCESS: Fib(3) is 2\n"
+else
+  sys-write 1 "FAILURE: Fib(3) is not 2. It is: "
+  sys-write 1 $fib3
+  sys-write 1 "\n"
+end
+
+[EXECUTE]

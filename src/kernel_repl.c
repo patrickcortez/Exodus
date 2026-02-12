@@ -6,12 +6,16 @@
 #include <string.h>
 #include <ctype.h>
 
+static int execute_line(repl_state_t *state, const char *raw_line);
+static int check_keyword(const char *line, const char *kw);
+
 void repl_init(repl_state_t *state) {
     memset(state, 0, sizeof(repl_state_t));
     state->line_count = 0;
     state->var_count = 0;
     state->in_block = 0;
     state->func_count = 0;
+    state->scope_start = 0;
 }
 
 void repl_reset_block(repl_state_t *state) {
@@ -38,15 +42,29 @@ static repl_var_t *find_var(repl_state_t *state, const char *name) {
 
 static repl_var_t *set_var(repl_state_t *state, const char *name, repl_value_t value) {
     repl_var_t *v = find_var(state, name);
-    if (!v) {
-        if (state->var_count >= REPL_MAX_VARS) {
-            fprintf(stderr, "[repl] too many variables\n");
-            return NULL;
-        }
-        v = &state->vars[state->var_count++];
-        strncpy(v->name, name, REPL_MAX_VAR_NAME - 1);
-        v->name[REPL_MAX_VAR_NAME - 1] = '\0';
+    
+    // If variable exists but is outside current scope, we must shadow it for 'var' declarations.
+    // However, find_var returns the *latest* variable.
+    // If v is found, we check its index.
+    int v_idx = -1;
+    if (v) {
+        v_idx = (int)(v - state->vars);
     }
+
+    // Default to updating existing variable if it is within current scope
+    if (v && v_idx >= state->scope_start) {
+        v->value = value;
+        return v;
+    }
+
+    // Otherwise create new variable (shadowing global/outer or creating fresh)
+    if (state->var_count >= REPL_MAX_VARS) {
+        fprintf(stderr, "[repl] too many variables\n");
+        return NULL;
+    }
+    v = &state->vars[state->var_count++];
+    strncpy(v->name, name, REPL_MAX_VAR_NAME - 1);
+    v->name[REPL_MAX_VAR_NAME - 1] = '\0';
     v->value = value;
     return v;
 }
@@ -60,7 +78,63 @@ static char *expand_variables(repl_state_t *state, const char *input, char *outp
     int len = (int)strlen(input);
 
     for (int i = 0; i < len && oi < outsize - 1; i++) {
-        if (input[i] == '$') {
+        // Command Substitution $(...)
+        if (input[i] == '$' && i + 1 < len && input[i+1] == '(') {
+            i += 2; // skip $(
+            char cmd_buf[REPL_MAX_LINE_LEN];
+            int ci = 0;
+            int paren_depth = 1;
+            
+            while (i < len) {
+                if (input[i] == ')') {
+                    paren_depth--;
+                    if (paren_depth == 0) break;
+                } else if (input[i] == '(') {
+                    paren_depth++;
+                }
+                if (ci < REPL_MAX_LINE_LEN - 1) {
+                    cmd_buf[ci++] = input[i];
+                }
+                i++;
+            }
+            cmd_buf[ci] = '\0';
+            
+            repl_value_t old_ret;
+            old_ret.type = VAL_NONE;
+            old_ret.int_val = 0;
+            old_ret.str_len = 0;
+            old_ret.list_count = 0;
+            old_ret.list_items = NULL;
+            old_ret.str_val[0] = '\0';
+            
+            if (state->last_return.type != VAL_NONE) {
+                old_ret = state->last_return;
+            }
+            
+            memset(&state->last_return, 0, sizeof(state->last_return));
+            
+            execute_line(state, cmd_buf);
+            
+            if (state->last_return.type == VAL_INT) {
+                int written = snprintf(output + oi, (size_t)(outsize - oi), "%ld", state->last_return.int_val);
+                if (written > 0) oi += written;
+            } else if (state->last_return.type == VAL_STRING) {
+                int vlen = state->last_return.str_len;
+                // Add quotes for string literals
+                if (oi + vlen + 2 < outsize) {
+                    output[oi++] = '"';
+                    memcpy(output + oi, state->last_return.str_val, (size_t)vlen);
+                    oi += vlen;
+                    output[oi++] = '"';
+                }
+            } else {
+                int written = snprintf(output + oi, (size_t)(outsize - oi), "0");
+                if (written > 0) oi += written;
+            }
+            
+            state->last_return = old_ret;
+            
+        } else if (input[i] == '$') {
             i++;
             char varname[REPL_MAX_VAR_NAME];
             int vi = 0;
@@ -235,6 +309,9 @@ static void push_var(repl_state_t *state, const char *name, repl_value_t value) 
 
 static int call_func(repl_state_t *state, repl_func_t *fn, int argc, char **argv) {
     int saved_var_count = state->var_count;
+    int saved_scope_start = state->scope_start;
+
+    state->scope_start = saved_var_count;
 
     for (int i = 0; i < fn->param_count && i < argc; i++) {
         repl_value_t pval;
@@ -250,7 +327,10 @@ static int call_func(repl_state_t *state, repl_func_t *fn, int argc, char **argv
     // Execute function body as a block to support control flow
     int errors = execute_block(state, fn->body, 0, fn->body_count);
 
+    if (errors == REPL_RET) errors = 0; // Swallow return signal
+
     remove_local_vars(state, saved_var_count);
+    state->scope_start = saved_scope_start;
     return errors;
 }
 
@@ -309,6 +389,51 @@ static int eval_condition(repl_state_t *state, char **tokens, int count) {
 static int execute_line(repl_state_t *state, const char *raw_line) {
     while (*raw_line && isspace((unsigned char)*raw_line)) raw_line++;
     if (!*raw_line || raw_line[0] == '#') return 0;
+
+    // Check for return statement
+    if (check_keyword(raw_line, "return")) {
+        char *expr = (char *)raw_line + 6;
+        while (*expr && isspace((unsigned char)*expr)) expr++;
+        
+        char expanded[REPL_MAX_LINE_LEN * 2];
+        expand_variables(state, expr, expanded, (int)sizeof(expanded));
+        
+        char *tokens[64];
+        int count = tokenize_line(expanded, tokens, 64);
+        
+        repl_value_t ret_val = {0};
+        
+        if (count > 0) {
+            if (count >= 3 && (strcmp(tokens[1], "+") == 0 || strcmp(tokens[1], "-") == 0 || 
+                strcmp(tokens[1], "*") == 0 || strcmp(tokens[1], "/") == 0 || strcmp(tokens[1], "%") == 0)) {
+                
+                long val1 = resolve_value(state, tokens[0]);
+                long val2 = resolve_value(state, tokens[2]);
+                long res = 0;
+                char *op = tokens[1];
+                
+                if (strcmp(op, "+") == 0) res = val1 + val2;
+                else if (strcmp(op, "-") == 0) res = val1 - val2;
+                else if (strcmp(op, "*") == 0) res = val1 * val2;
+                else if (strcmp(op, "/") == 0) res = (val2 != 0) ? (val1 / val2) : 0;
+                else if (strcmp(op, "%") == 0) res = (val2 != 0) ? (val1 % val2) : 0;
+                
+                ret_val.type = VAL_INT;
+                ret_val.int_val = res;
+                snprintf(ret_val.str_val, sizeof(ret_val.str_val), "%ld", res);
+                ret_val.str_len = (int)strlen(ret_val.str_val);
+            } else {
+                 if (!parse_literal(tokens[0], &ret_val)) {
+                     ret_val.type = VAL_STRING;
+                     strncpy(ret_val.str_val, tokens[0], REPL_MAX_VAR_VALUE - 1);
+                     ret_val.str_len = (int)strlen(ret_val.str_val);
+                 }
+            }
+        }
+        
+        state->last_return = ret_val;
+        return REPL_RET;
+    }
 
     char expanded[REPL_MAX_LINE_LEN * 2];
     expand_variables(state, raw_line, expanded, (int)sizeof(expanded));
@@ -497,8 +622,7 @@ static int handle_if_block(repl_state_t *state, char lines[][REPL_MAX_LINE_LEN],
 
     for (int b = 0; b < branch_count; b++) {
         if (branches[b].is_else) {
-            execute_block(state, lines, branches[b].start, branches[b].end);
-            return 0;
+            return execute_block(state, lines, branches[b].start, branches[b].end);
         }
 
         char cond_copy[REPL_MAX_LINE_LEN];
@@ -521,8 +645,7 @@ static int handle_if_block(repl_state_t *state, char lines[][REPL_MAX_LINE_LEN],
         int cond_count = tokenize_line(cond_work, cond_tokens, 64);
 
         if (eval_condition(state, cond_tokens, cond_count)) {
-            execute_block(state, lines, branches[b].start, branches[b].end);
-            return 0;
+            return execute_block(state, lines, branches[b].start, branches[b].end);
         }
     }
 
@@ -594,19 +717,21 @@ static int execute_block(repl_state_t *state, char lines[][REPL_MAX_LINE_LEN], i
             continue;
         }
 
-        if (check_keyword(p, "if")) {
-            int if_end = find_matching_end(lines, i + 1, end);
-            if (if_end >= end) {
-                fprintf(stderr, "[repl] if missing 'end'\n");
-                i++;
-                errors++;
+            if (check_keyword(p, "if")) {
+                int if_end = find_matching_end(lines, i + 1, end);
+                if (if_end >= end) {
+                    fprintf(stderr, "[repl] if missing 'end'\n");
+                    i++;
+                    errors++;
+                    continue;
+                }
+    
+                int res = handle_if_block(state, lines, i, if_end);
+                if (res == REPL_RET) return REPL_RET;
+
+                i = if_end + 1;
                 continue;
             }
-
-            handle_if_block(state, lines, i, if_end);
-            i = if_end + 1;
-            continue;
-        }
 
         if (check_keyword(p, "while")) {
             int while_end = find_matching_end(lines, i + 1, end);
@@ -636,14 +761,17 @@ static int execute_block(repl_state_t *state, char lines[][REPL_MAX_LINE_LEN], i
                     break;
                 }
                 
-                execute_block(state, lines, i + 1, while_end);
+                int res = execute_block(state, lines, i + 1, while_end);
+                if (res == REPL_RET) return REPL_RET;
             }
 
             i = while_end + 1;
             continue;
         }
 
-        if (execute_line(state, lines[i]) < 0)
+        int res = execute_line(state, lines[i]);
+        if (res == REPL_RET) return REPL_RET;
+        if (res < 0)
             errors++;
         i++;
     }

@@ -44,13 +44,8 @@ static repl_value_t make_string(const char *s, int len) {
 }
 
 static repl_value_t make_error(const char *syscall_name) {
-    repl_value_t r;
-    memset(&r, 0, sizeof(r));
-    r.type = VAL_STRING;
-    snprintf(r.str_val, sizeof(r.str_val), "[error] %s: %s", syscall_name, strerror(errno));
-    r.str_len = (int)strlen(r.str_val);
-    r.int_val = -1;
-    return r;
+    (void)syscall_name; // unused
+    return make_int(-1);
 }
 
 static repl_value_t make_status(int ret, const char *name) {

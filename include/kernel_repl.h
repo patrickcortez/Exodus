@@ -40,6 +40,10 @@ typedef struct {
     int  body_count;
 } repl_func_t;
 
+#define REPL_OK  0
+#define REPL_ERR -1
+#define REPL_RET 2
+
 typedef struct {
     char         lines[REPL_MAX_LINES][REPL_MAX_LINE_LEN];
     int          line_count;
@@ -48,6 +52,8 @@ typedef struct {
     int          in_block;
     repl_func_t  funcs[REPL_MAX_FUNCS];
     int          func_count;
+    repl_value_t last_return;
+    int          scope_start;
 } repl_state_t;
 
 void repl_init(repl_state_t *state);

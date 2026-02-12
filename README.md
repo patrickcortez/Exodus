@@ -207,6 +207,16 @@ atomic
 
 You'll see the `atomic>` prompt. Type lines of code, then type `[EXECUTE]` on a new line to run the block. Press `Ctrl+C` to cancel.
 
+### Running Scripts (.atom)
+
+You can write Atomic scripts in a file with the `.atom` extension and execute them directly:
+
+```bash
+exodus script.atom
+```
+
+**Important**: Scripts must end with the `[EXECUTE]` command to trigger execution. If omitted, the script will load but not run.
+
 ### Syntax
 
 #### Variables & Literals
@@ -232,23 +242,85 @@ Supported literal types:
 Reference variables with `$name`:
 ```bash
 var fd = sys-open "/tmp/test" O_RDONLY
-sys-print $fd
+sys-write 1 $fd
 ```
+
+#### Command Substitution
+Capture the output of a command or function return value using `$(...)`:
+
+```bash
+var fd = $(sys-open "/tmp/test" O_RDONLY)
+var sum = $(add 10 20)
+sys-write 1 $(sys-uname)
+```
+
+#### Command Substitution vs. Direct Assignment
+
+##### Direct Assignment
+Direct assignment `var x = sys-open ...` works because `sys-` commands return values directly. It is slightly faster but **cannot be nested**.
+
+```bash
+# Correct
+var fd = sys-open "/tmp/log" O_RDONLY
+
+# INVALID - Cannot nest directly
+var fd = sys-open (sys-open ...) 
+```
+
+##### Command Substitution `$(...)`
+Using `$(...)` captures the output (return value) of *any* command, including user-defined functions, and allows for **nesting**.
+
+```bash
+# Capture user function return
+var sum = $(add 10 20)
+
+# Nested calls
+var result = $(add 5 $(sub 10 2))
+
+# Use in arguments
+sys-write 1 $(sys-uname)
+```
+Atomic supports basic integer arithmetic in variable assignments:
+```bash
+var a = 10
+var b = 20
+var sum = $a + $b
+var diff = $a - $b
+var prod = $a * $b
+var quot = $b / $a
+var mod = $b % 3
+```
+Supported operators: `+`, `-`, `*`, `/`, `%`.
 
 #### Conditionals
 
 ```bash
 if $fd >= 0
-  sys-print "opened"
+if $fd >= 0
+  sys-write 1 "opened"
   sys-close $fd
 else if $fd == -2
-  sys-print "not found"
+  sys-write 1 "not found"
 else
-  sys-print "error"
+  sys-write 1 "error"
 end
 ```
 
 Operators: `==`, `!=`, `>`, `<`, `>=`, `<=`. Nesting is supported.
+*Note: String string comparisons (e.g., `if "a" == "b"`) are fully supported.*
+
+#### Loops
+
+Atomic supports `while` loops:
+
+```bash
+var i = 0
+while $i < 5
+  sys-write 1 $i
+  sys-write 1 "\n"
+  var i = $i + 1
+end
+```
 
 #### Functions
 
@@ -257,10 +329,12 @@ fn open_and_read path
   var fd = sys-open $path O_RDONLY
   if $fd >= 0
     var data = sys-read $fd 256
-    sys-print $data
+    var data = sys-read $fd 256
+    sys-write 1 $data
     sys-close $fd
   else
-    print "cannot open:" $path
+    sys-write 1 "cannot open:"
+    sys-write 1 $path
   end
 end
 
@@ -269,7 +343,31 @@ open_and_read "/proc/version"
 [EXECUTE]
 ```
 
-Functions support parameters and local variable scoping.
+Functions support parameters, local variable scoping, and return values.
+
+```bash
+fn add a b
+  return $a + $b
+end
+
+var res = $(add 5 10)
+# res is 15
+```
+
+**Recursion** is fully supported. Local variables declared with `var` inside a function shadow outer variables, allowing for safe recursive calls.
+
+```bash
+fn fib n
+  if $n <= 1
+    return $n
+  end
+  var n1 = $n - 1
+  var n2 = $n - 2
+  var f1 = $(fib $n1)
+  var f2 = $(fib $n2)
+  return $f1 + $f2
+end
+```
 
 #### Comments & Print
 
